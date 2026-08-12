@@ -21,6 +21,7 @@ export type DecisionReason =
   | "auth_time_stale"
   | "auth_time_missing"
   | "id_token_missing"
+  | "id_token_invalid"
   | "subject_mismatch"
   | "token_invalid"
   | "unknown_tool"

@@ -72,6 +72,8 @@ const MESSAGES: Record<DecisionReason, string> = {
     "The token carries no auth_time, so freshness cannot be proved. Re-authenticate to continue.",
   id_token_missing:
     "No ID token was presented, so freshness cannot be proved. Re-authenticate to continue.",
+  id_token_invalid:
+    "The ID token did not verify, so freshness cannot be proved. Re-authenticate to continue.",
   subject_mismatch:
     "The ID token and the access token describe different people. Refused.",
   token_invalid: "The access token did not verify.",
@@ -203,9 +205,16 @@ export async function enforceToolCall(
       observed.amr = idClaims.amr;
     } catch (error) {
       if (!(error instanceof TokenVerificationError)) throw error;
-      // An unverifiable ID token proves nothing. Left absent so the decision
-      // below treats freshness as unproven.
+      // An unverifiable ID token proves nothing — most often it has simply
+      // expired, since the ID token lives an hour and the access token a day.
+      // Reported distinctly from a genuinely absent claim so the audit trail
+      // says which of the two actually happened.
       observed.authTime = undefined;
+      if (mode === "step-up") {
+        return await finish("challenge", "id_token_invalid", {
+          requiredMaxAge: tool.maxAuthAgeSeconds,
+        });
+      }
     }
   } else if (mode === "step-up") {
     return await finish("challenge", "id_token_missing", {
