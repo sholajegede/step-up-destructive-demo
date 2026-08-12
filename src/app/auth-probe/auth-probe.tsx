@@ -68,8 +68,10 @@ export function AuthProbe({ session }: { session: SessionView }) {
       note(
         "Token refresh",
         c.verdict,
-        // A refresh that leaves auth_time alone is the result the design needs.
-        !c.authTimeMoved,
+        // Only a refresh that minted a new ID token carrying the original
+        // auth_time is a pass. When nothing was minted there is nothing to
+        // compare, and that is left unmarked rather than shown as a pass.
+        !c.idTokenChanged ? null : !c.authTimeMoved,
       );
       note(
         "Did the provider mint anything new",
