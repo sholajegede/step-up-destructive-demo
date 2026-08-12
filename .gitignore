@@ -42,3 +42,8 @@ next-env.d.ts
 
 # Committed template, no secrets
 !.env.example
+
+# Local-only working notes
+BUILD_PLAN.md
+BUILD_LOG.md
+CLAUDE.md
