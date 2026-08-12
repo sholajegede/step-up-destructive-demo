@@ -69,6 +69,17 @@ export async function POST() {
         : toClaimsView(await verifyIdToken(tokens.id_token)),
   };
 
+  // Whether the provider minted anything new, decided on the token strings
+  // themselves rather than on their claims.
+  //
+  // This separates two very different outcomes that look identical from the
+  // claims alone: a provider that mints a fresh token carrying the original
+  // auth_time (the behaviour the design needs), and a provider that simply
+  // hands back the token it already issued (which says nothing either way).
+  const accessTokenChanged = tokens.access_token !== session.accessToken;
+  const idTokenChanged =
+    tokens.id_token !== undefined && tokens.id_token !== session.idToken;
+
   await saveSession({
     accessToken: tokens.access_token,
     idToken: tokens.id_token ?? session.idToken,
@@ -80,29 +91,45 @@ export async function POST() {
         ? undefined
         : Math.floor(Date.now() / 1000) + tokens.expires_in,
     subject: after.accessToken.sub ?? session.subject,
-    authTime: after.accessToken.authTime ?? session.authTime,
+    // Freshness is carried by the ID token, so that is where it is read from.
+    authTime: after.idToken?.authTime ?? session.authTime,
   });
 
-  const authTimeMoved =
-    before.accessToken.authTime !== after.accessToken.authTime;
+  // `auth_time` lives on the ID token, not the access token, so the
+  // comparison must be made there. Comparing access tokens would compare
+  // undefined with undefined and report "unchanged" while proving nothing.
+  const authTimeBefore = before.idToken?.authTime;
+  const authTimeAfter = after.idToken?.authTime;
+  const idTokenReturned = tokens.id_token !== undefined;
 
   return NextResponse.json({
     before,
     after,
     comparison: {
-      authTimeBefore: before.accessToken.authTime,
-      authTimeAfter: after.accessToken.authTime,
-      authTimeMoved,
+      authTimeBefore,
+      authTimeAfter,
+      authTimeMoved: idTokenChanged && authTimeBefore !== authTimeAfter,
+      idTokenReturned,
+      accessTokenChanged,
+      idTokenChanged,
       issuedAtMoved: before.accessToken.issuedAt !== after.accessToken.issuedAt,
       tokenIdMoved: before.accessToken.jti !== after.accessToken.jti,
       refreshTokenRotated: tokens.refresh_token !== undefined,
       /**
-       * The finding in one line. `auth_time` must not move on a refresh; if
-       * it does, freshness cannot be built on it.
+       * The finding in one line.
+       *
+       * A pass requires the provider to have actually minted a new ID token
+       * and for that new token to carry the original `auth_time`. An
+       * unchanged `auth_time` on an unchanged token is not evidence, and is
+       * reported as inconclusive rather than dressed up as a pass.
        */
-      verdict: authTimeMoved
-        ? "auth_time MOVED on refresh — it does not represent human presence"
-        : "auth_time held steady on refresh — it represents human presence",
+      verdict: !idTokenReturned
+        ? "INCONCLUSIVE — the refresh returned no ID token, so there is no auth_time to compare"
+        : !idTokenChanged
+          ? "INCONCLUSIVE — the refresh returned the same ID token, so nothing was minted to compare"
+          : authTimeBefore !== authTimeAfter
+            ? "auth_time MOVED on refresh — it does not represent human presence"
+            : "auth_time held steady across a newly minted ID token — it represents human presence",
     },
   });
 }
