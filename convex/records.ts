@@ -106,6 +106,93 @@ export const getByRef = query({
   },
 });
 
+/** Counts and totals for one kind. Read-only. */
+export const summarize = query({
+  args: { kind: recordKind },
+  handler: async (ctx, { kind }) => {
+    const rows = await ctx.db
+      .query("records")
+      .withIndex("by_kind", (q) => q.eq("kind", kind))
+      .collect();
+    const live = rows.filter((r) => r.deletedAt === undefined);
+    return {
+      kind,
+      total: live.length,
+      deleted: rows.length - live.length,
+      byStatus: live.reduce<Record<string, number>>((acc, row) => {
+        acc[row.status] = (acc[row.status] ?? 0) + 1;
+        return acc;
+      }, {}),
+      totalAmountCents: live.reduce((sum, r) => sum + (r.amountCents ?? 0), 0),
+    };
+  },
+});
+
+/**
+ * Marks a record deleted.
+ *
+ * Soft on purpose: an action that slipped through must stay visible in the
+ * console and in the audit trail rather than disappearing.
+ */
+export const softDelete = mutation({
+  args: { ref: v.string() },
+  handler: async (ctx, { ref }) => {
+    const row = await ctx.db
+      .query("records")
+      .withIndex("by_ref", (q) => q.eq("ref", ref))
+      .unique();
+    if (row === null) throw new Error(`No record ${ref}`);
+    if (row.deletedAt !== undefined) {
+      return { ref, alreadyDeleted: true, deletedAt: row.deletedAt };
+    }
+    const deletedAt = Date.now();
+    await ctx.db.patch(row._id, { deletedAt, status: "deleted" });
+    return { ref, alreadyDeleted: false, deletedAt };
+  },
+});
+
+export const refund = mutation({
+  args: { ref: v.string() },
+  handler: async (ctx, { ref }) => {
+    const row = await ctx.db
+      .query("records")
+      .withIndex("by_ref", (q) => q.eq("ref", ref))
+      .unique();
+    if (row === null) throw new Error(`No record ${ref}`);
+    if (row.kind !== "invoice") throw new Error(`${ref} is not an invoice`);
+    if (row.refundedAt !== undefined) {
+      return { ref, alreadyRefunded: true, refundedAt: row.refundedAt };
+    }
+    const refundedAt = Date.now();
+    await ctx.db.patch(row._id, { refundedAt, status: "refunded" });
+    return {
+      ref,
+      alreadyRefunded: false,
+      refundedAt,
+      amountCents: row.amountCents,
+    };
+  },
+});
+
+export const deploy = mutation({
+  args: { ref: v.string(), environment: v.string() },
+  handler: async (ctx, { ref, environment }) => {
+    const row = await ctx.db
+      .query("records")
+      .withIndex("by_ref", (q) => q.eq("ref", ref))
+      .unique();
+    if (row === null) throw new Error(`No record ${ref}`);
+    if (row.kind !== "release") throw new Error(`${ref} is not a release`);
+    const deployedAt = Date.now();
+    await ctx.db.patch(row._id, {
+      deployedAt,
+      environment,
+      status: `deployed:${environment}`,
+    });
+    return { ref, environment, deployedAt };
+  },
+});
+
 export const seedRecords = mutation({
   args: {},
   handler: async (ctx) => {
