@@ -63,8 +63,13 @@ export async function POST(request: NextRequest) {
     correlationId: result.correlationId,
     approvalMode: result.approvalMode,
     destructive: result.destructive,
+    // The freshness arithmetic as the seam evaluated it. `authTime` is a
+    // timestamp, not credential material — it identifies when a person
+    // authenticated, and cannot be replayed as proof that they did.
+    authTime: result.authTime,
     authAgeSeconds: result.authAgeSeconds,
     maxAuthAgeSeconds: result.maxAuthAgeSeconds,
+    amr: result.amr,
   };
 
   if (result.decision === "challenge") {

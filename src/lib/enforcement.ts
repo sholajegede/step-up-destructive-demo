@@ -49,6 +49,8 @@ export type EnforcementResult = {
   authTime?: number;
   authAgeSeconds?: number;
   maxAuthAgeSeconds?: number;
+  /** Authentication methods from the ID token, when the provider sends them. */
+  amr?: string[];
   /** Set on a challenge. The RFC 9470 `WWW-Authenticate` value. */
   challengeHeader?: string;
   /** Human-readable explanation. Safe to show a caller. */
@@ -139,6 +141,7 @@ export async function enforceToolCall(
       authTime: observed.authTime,
       authAgeSeconds: extra.authAgeSeconds,
       maxAuthAgeSeconds: observed.maxAuthAgeSeconds,
+      amr: observed.amr,
       message: MESSAGES[reason],
       challengeHeader:
         decision === "challenge" && extra.requiredMaxAge !== undefined
