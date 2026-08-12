@@ -118,8 +118,16 @@ export function anthropicConfig() {
   assertServer();
   return {
     apiKey: required("ANTHROPIC_API_KEY"),
+    /**
+     * The model id. Deliberately `required()` rather than defaulted, so a
+     * model identifier can never drift into the source.
+     */
     model: required("ANTHROPIC_MODEL"),
-    maxTokens: optionalNumber("ANTHROPIC_MAX_TOKENS", 4096),
+    /**
+     * On models where thinking is on by default this caps thinking plus
+     * response text together, so it is set well above what the replies need.
+     */
+    maxTokens: optionalNumber("ANTHROPIC_MAX_TOKENS", 16000),
   };
 }
 

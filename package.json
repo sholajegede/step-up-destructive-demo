@@ -12,6 +12,7 @@
     "seed": "convex run tools:seedRegistry '{}' && convex run records:seedRecords '{}'"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
     "convex": "^1.43.0",
     "jose": "^6.2.8",
     "next": "16.3.0",
