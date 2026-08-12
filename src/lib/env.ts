@@ -96,6 +96,23 @@ export function authConfig() {
   };
 }
 
+/**
+ * Secret used to encrypt the session cookie.
+ *
+ * Must be long enough to carry real entropy. It is hashed to a 256-bit key
+ * before use, so the raw value never becomes the key directly.
+ */
+export function sessionSecret(): string {
+  const secret = required("SESSION_SECRET");
+  if (secret.length < 32) {
+    throw new Error(
+      "SESSION_SECRET must be at least 32 characters. Generate one with " +
+        "`openssl rand -base64 32`.",
+    );
+  }
+  return secret;
+}
+
 /** Anthropic configuration. The model id is never hardcoded. */
 export function anthropicConfig() {
   assertServer();
@@ -147,5 +164,6 @@ export function configPresence(): Record<string, boolean> {
       has("KINDE_REDIRECT_URI"),
     anthropic: has("ANTHROPIC_API_KEY") && has("ANTHROPIC_MODEL"),
     convex: has("NEXT_PUBLIC_CONVEX_URL"),
+    session: has("SESSION_SECRET"),
   };
 }
