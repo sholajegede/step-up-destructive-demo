@@ -2,12 +2,16 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
+import type { ClaimsView } from "@/lib/claims-view";
 import type { SessionView } from "@/lib/session-view";
 
 type RefreshComparison = {
   authTimeBefore?: number;
   authTimeAfter?: number;
   authTimeMoved: boolean;
+  idTokenReturned: boolean;
+  accessTokenChanged: boolean;
+  idTokenChanged: boolean;
   issuedAtMoved: boolean;
   tokenIdMoved: boolean;
   refreshTokenRotated: boolean;
@@ -68,10 +72,12 @@ export function AuthProbe({ session }: { session: SessionView }) {
         !c.authTimeMoved,
       );
       note(
-        "Refresh issued a new token",
-        `iat moved: ${c.issuedAtMoved}, jti moved: ${c.tokenIdMoved}, ` +
+        "Did the provider mint anything new",
+        `access token string changed: ${c.accessTokenChanged}, ` +
+          `ID token string changed: ${c.idTokenChanged}, ` +
+          `iat moved: ${c.issuedAtMoved}, jti moved: ${c.tokenIdMoved}, ` +
           `refresh token rotated: ${c.refreshTokenRotated}`,
-        c.issuedAtMoved,
+        c.idTokenChanged,
       );
       // The session lives on the server; re-render it there.
       router.refresh();
@@ -83,8 +89,6 @@ export function AuthProbe({ session }: { session: SessionView }) {
       setBusy(false);
     }
   };
-
-  const claims = session.accessToken ?? session.idToken;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-8 px-6 py-12">
@@ -144,42 +148,24 @@ export function AuthProbe({ session }: { session: SessionView }) {
             Not signed in.
           </p>
         ) : (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 rounded border border-black/10 p-4 text-sm dark:border-white/15">
-            <Row label="subject" value={claims?.sub} />
-            <Row label="email" value={claims?.email} />
-            <Row
-              label="auth_time"
-              value={
-                claims?.authTime === undefined
-                  ? "ABSENT — freshness cannot be proved"
-                  : `${claims.authTime} (${claims.authTimeIso})`
-              }
+          <div className="flex flex-col gap-4">
+            {/* Shown side by side because the two tokens differ in exactly
+                the way that decides where freshness can be read from. */}
+            <TokenPanel
+              title="ID token"
+              subtitle="carries auth_time"
+              claims={session.idToken}
             />
-            <Row
-              label="auth age"
-              value={
-                claims?.authAgeSeconds === undefined
-                  ? undefined
-                  : `${claims.authAgeSeconds}s ago`
-              }
+            <TokenPanel
+              title="Access token"
+              subtitle="presented on tool calls"
+              claims={session.accessToken}
             />
-            <Row
-              label="iat"
-              value={
-                claims?.issuedAt === undefined
-                  ? undefined
-                  : `${claims.issuedAt} (${claims.issuedAtIso})`
-              }
-            />
-            <Row label="exp" value={claims?.expiresAtIso} />
-            <Row label="amr" value={claims?.amr?.join(", ")} />
-            <Row label="acr" value={claims?.acr} />
-            <Row label="jti" value={claims?.jti} />
-            <Row
-              label="refresh token"
-              value={session.hasRefreshToken === true ? "present" : "absent"}
-            />
-          </dl>
+            <p className="text-sm text-black/60 dark:text-white/60">
+              Refresh token:{" "}
+              {session.hasRefreshToken === true ? "present" : "absent"}
+            </p>
+          </div>
         )}
         {session.accessTokenError !== undefined && (
           <p className="text-sm text-red-600 dark:text-red-400">
@@ -246,6 +232,65 @@ export function AuthProbe({ session }: { session: SessionView }) {
         </section>
       )}
     </main>
+  );
+}
+
+function TokenPanel({
+  title,
+  subtitle,
+  claims,
+}: {
+  title: string;
+  subtitle: string;
+  claims?: ClaimsView;
+}) {
+  return (
+    <div className="rounded border border-black/10 p-4 dark:border-white/15">
+      <p className="mb-3 text-sm font-semibold">
+        {title}{" "}
+        <span className="font-normal text-black/50 dark:text-white/50">
+          — {subtitle}
+        </span>
+      </p>
+      {claims === undefined ? (
+        <p className="text-sm text-black/50 dark:text-white/50">
+          Not present in this session.
+        </p>
+      ) : (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+          <Row label="subject" value={claims.sub} />
+          <Row label="email" value={claims.email} />
+          <Row
+            label="auth_time"
+            value={
+              claims.authTime === undefined
+                ? "ABSENT — freshness cannot be read here"
+                : `${claims.authTime} (${claims.authTimeIso})`
+            }
+          />
+          <Row
+            label="auth age"
+            value={
+              claims.authAgeSeconds === undefined
+                ? undefined
+                : `${claims.authAgeSeconds}s ago`
+            }
+          />
+          <Row
+            label="iat"
+            value={
+              claims.issuedAt === undefined
+                ? undefined
+                : `${claims.issuedAt} (${claims.issuedAtIso})`
+            }
+          />
+          <Row label="exp" value={claims.expiresAtIso} />
+          <Row label="amr" value={claims.amr?.join(", ")} />
+          <Row label="acr" value={claims.acr} />
+          <Row label="jti" value={claims.jti} />
+        </dl>
+      )}
+    </div>
   );
 }
 
