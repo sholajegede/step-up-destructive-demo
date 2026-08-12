@@ -17,8 +17,8 @@ import { anthropicConfig, appConfig, approvalMode } from "./env";
  *
  * - allow     — feed the result back and keep going.
  * - challenge — stop. Do not retry, do not try another tool, do not work
- *               around it. Surface the re-auth link to the human, carry the
- *               correlationId and required max_age through, and pause the run.
+ *               around it. Freeze the conversation, surface the re-auth link
+ *               to the human, and pause the run.
  * - deny      — stop and report. A denial is not something re-authentication
  *               fixes, so there is nothing to hand the human.
  *
@@ -48,36 +48,47 @@ export type AgentOutcome = {
   runId: Id<"runs">;
   correlationId: string;
   status: "completed" | "halted" | "failed";
-  /** The final assistant text. */
   message: string;
-  /** Set when the run halted on a step-up challenge. */
   challenge?: {
     tool: string;
     reason: string;
     message: string;
     requiredMaxAge?: number;
+    authAgeSeconds?: number;
     reauthUrl: string;
     correlationId: string;
   };
-  /** Set when the run stopped on a denial. */
   denial?: { tool: string; reason: string; message: string };
+  /** Present on a resume that released the held action. */
+  released?: {
+    tool: string;
+    reason: string;
+    authAgeSeconds?: number;
+    maxAuthAgeSeconds?: number;
+    amr?: string[];
+    result: unknown;
+  };
   toolCalls: number;
+};
+
+type SeamBody = {
+  decision?: "allow" | "challenge" | "deny";
+  reason?: string;
+  message?: string;
+  correlationId?: string;
+  maxAuthAgeSeconds?: number;
+  authTime?: number;
+  authAgeSeconds?: number;
+  amr?: string[];
+  executed?: boolean;
+  result?: unknown;
+  error?: string;
+  reauthUrl?: string;
 };
 
 type SeamResponse = {
   status: number;
-  body: {
-    decision?: "allow" | "challenge" | "deny";
-    reason?: string;
-    message?: string;
-    correlationId?: string;
-    maxAuthAgeSeconds?: number;
-    authAgeSeconds?: number;
-    executed?: boolean;
-    result?: unknown;
-    error?: string;
-    reauthUrl?: string;
-  };
+  body: SeamBody;
   wwwAuthenticate: string | null;
 };
 
@@ -105,7 +116,7 @@ async function callSeam(
 
   return {
     status: response.status,
-    body: await response.json(),
+    body: (await response.json()) as SeamBody,
     wwwAuthenticate: response.headers.get("WWW-Authenticate"),
   };
 }
@@ -122,56 +133,214 @@ async function loadTools(): Promise<Anthropic.Tool[]> {
     }));
 }
 
-export async function runAgent(options: {
-  prompt: string;
-  userId: string;
-  cookieHeader: string;
+type EventType =
+  | "model_message"
+  | "tool_requested"
+  | "tool_allowed"
+  | "tool_challenged"
+  | "tool_denied"
+  | "tool_result"
+  | "reauth_completed"
+  | "run_finished";
+
+type LoopContext = {
+  runId: Id<"runs">;
   correlationId: string;
-}): Promise<AgentOutcome> {
+  cookieHeader: string;
+};
+
+async function appendEvent(
+  ctx: LoopContext,
+  type: EventType,
+  detail: {
+    toolName?: string;
+    message?: string;
+    detail?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await convex().mutation(api.runs.appendEvent, {
+    runId: ctx.runId,
+    type,
+    toolName: detail.toolName,
+    message: detail.message,
+    detail: detail.detail,
+  });
+}
+
+/** Freezes the conversation at a challenge and returns the halted outcome. */
+async function pauseOnChallenge(
+  ctx: LoopContext,
+  seam: SeamResponse,
+  request: { id: string; name: string; input: unknown },
+  messages: Anthropic.MessageParam[],
+  lastText: string,
+  toolCalls: number,
+): Promise<AgentOutcome> {
+  await appendEvent(ctx, "tool_challenged", {
+    toolName: request.name,
+    message: seam.body.message,
+    detail: {
+      reason: seam.body.reason,
+      wwwAuthenticate: seam.wwwAuthenticate,
+      requiredMaxAge: seam.body.maxAuthAgeSeconds,
+      authAgeSeconds: seam.body.authAgeSeconds,
+    },
+  });
+
+  await convex().mutation(api.runs.pause, {
+    runId: ctx.runId,
+    haltedReason: seam.body.reason ?? "step_up_required",
+    challengeAuthTime: seam.body.authTime,
+    pausedState: {
+      messages,
+      toolUseId: request.id,
+      toolName: request.name,
+      toolInput: request.input,
+    },
+  });
+
+  await appendEvent(ctx, "run_finished", {
+    message: "Run paused, waiting for a fresh authentication.",
+  });
+
+  return {
+    runId: ctx.runId,
+    correlationId: ctx.correlationId,
+    status: "halted",
+    message: lastText,
+    toolCalls,
+    challenge: {
+      tool: request.name,
+      reason: seam.body.reason ?? "step_up_required",
+      message: seam.body.message ?? "A fresh authentication is required.",
+      requiredMaxAge: seam.body.maxAuthAgeSeconds,
+      authAgeSeconds: seam.body.authAgeSeconds,
+      reauthUrl:
+        seam.body.reauthUrl ??
+        "/api/auth/login?max_age=0&prompt=login&stepUp=1",
+      correlationId: seam.body.correlationId ?? ctx.correlationId,
+    },
+  };
+}
+
+/**
+ * Drives the model loop.
+ *
+ * `pending` is set only on a resume: it is the tool call that was held by a
+ * challenge, and it is re-presented to the seam before the model is consulted
+ * again. Re-presenting rather than re-planning is what makes the resume the
+ * *same* task — the model never gets a chance to pick a different action.
+ */
+async function drive(
+  ctx: LoopContext,
+  seed: Anthropic.MessageParam[],
+  pending?: { toolUseId: string; toolName: string; toolInput: unknown },
+): Promise<AgentOutcome> {
   const { apiKey, model, maxTokens } = anthropicConfig();
   const client = new Anthropic({ apiKey });
   const tools = await loadTools();
 
-  const runId = await convex().mutation(api.runs.start, {
-    correlationId: options.correlationId,
-    userId: options.userId,
-    prompt: options.prompt,
-    // Resolved server-side inside the seam; recorded here for the timeline.
-    approvalMode: approvalMode(),
-  });
-
-  const event = async (
-    type:
-      | "model_message"
-      | "tool_requested"
-      | "tool_allowed"
-      | "tool_challenged"
-      | "tool_denied"
-      | "tool_result"
-      | "run_finished",
-    detail: {
-      toolName?: string;
-      message?: string;
-      detail?: Record<string, unknown>;
-    },
-  ) => {
-    await convex().mutation(api.runs.appendEvent, {
-      runId,
-      type,
-      toolName: detail.toolName,
-      message: detail.message,
-      detail: detail.detail,
-    });
-  };
-
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: options.prompt },
-  ];
+  const messages = [...seed];
   let toolCalls = 0;
   let lastText = "";
+  let released: AgentOutcome["released"];
 
-  // A hard ceiling on model turns. The loop also ends on end_turn, on a
-  // challenge, and on a denial; this only bounds a pathological run.
+  if (pending !== undefined) {
+    const seam = await callSeam(
+      pending.toolName,
+      pending.toolInput,
+      ctx.correlationId,
+      ctx.cookieHeader,
+    );
+    toolCalls += 1;
+
+    if (seam.status === 403 && seam.body.decision === "challenge") {
+      // Still stale. The action stays held — this is the negative case that
+      // must hold when a resume was not preceded by a real re-authentication.
+      return await pauseOnChallenge(
+        ctx,
+        seam,
+        {
+          id: pending.toolUseId,
+          name: pending.toolName,
+          input: pending.toolInput,
+        },
+        messages,
+        lastText,
+        toolCalls,
+      );
+    }
+
+    if (seam.body.decision === "deny" || seam.status === 401) {
+      await appendEvent(ctx, "tool_denied", {
+        toolName: pending.toolName,
+        message: seam.body.message,
+        detail: { reason: seam.body.reason },
+      });
+      await convex().mutation(api.runs.setStatus, {
+        runId: ctx.runId,
+        status: "failed",
+        haltedReason: seam.body.reason,
+      });
+      await appendEvent(ctx, "run_finished", {
+        message: "Run stopped on a denial.",
+      });
+      return {
+        runId: ctx.runId,
+        correlationId: ctx.correlationId,
+        status: "failed",
+        message: lastText,
+        toolCalls,
+        denial: {
+          tool: pending.toolName,
+          reason: seam.body.reason ?? "denied",
+          message: seam.body.message ?? "The call was refused.",
+        },
+      };
+    }
+
+    await convex().mutation(api.runs.clearPausedState, { runId: ctx.runId });
+    await appendEvent(ctx, "tool_allowed", {
+      toolName: pending.toolName,
+      message: seam.body.message,
+      detail: {
+        reason: seam.body.reason,
+        authAgeSeconds: seam.body.authAgeSeconds,
+        maxAuthAgeSeconds: seam.body.maxAuthAgeSeconds,
+        amr: seam.body.amr,
+      },
+    });
+    await appendEvent(ctx, "tool_result", {
+      toolName: pending.toolName,
+      detail: { result: seam.body.result as Record<string, unknown> },
+    });
+
+    released = {
+      tool: pending.toolName,
+      reason: seam.body.reason ?? "fresh_authentication",
+      authAgeSeconds: seam.body.authAgeSeconds,
+      maxAuthAgeSeconds: seam.body.maxAuthAgeSeconds,
+      amr: seam.body.amr,
+      result: seam.body.result,
+    };
+
+    messages.push({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: pending.toolUseId,
+          content: JSON.stringify(
+            seam.body.executed === true
+              ? seam.body.result
+              : { error: seam.body.error ?? "The tool did not run." },
+          ),
+          is_error: seam.body.executed !== true,
+        },
+      ],
+    });
+  }
+
   for (let turn = 0; turn < 12; turn += 1) {
     const response = await client.messages.create({
       model,
@@ -188,21 +357,22 @@ export async function runAgent(options: {
       .trim();
     if (text !== "") {
       lastText = text;
-      await event("model_message", { message: text });
+      await appendEvent(ctx, "model_message", { message: text });
     }
 
     if (response.stop_reason !== "tool_use") {
       await convex().mutation(api.runs.setStatus, {
-        runId,
+        runId: ctx.runId,
         status: "completed",
       });
-      await event("run_finished", { message: "Run completed." });
+      await appendEvent(ctx, "run_finished", { message: "Run completed." });
       return {
-        runId,
-        correlationId: options.correlationId,
+        runId: ctx.runId,
+        correlationId: ctx.correlationId,
         status: "completed",
         message: lastText,
         toolCalls,
+        released,
       };
     }
 
@@ -215,7 +385,7 @@ export async function runAgent(options: {
 
     for (const request of requests) {
       toolCalls += 1;
-      await event("tool_requested", {
+      await appendEvent(ctx, "tool_requested", {
         toolName: request.name,
         detail: { input: request.input as Record<string, unknown> },
       });
@@ -223,65 +393,38 @@ export async function runAgent(options: {
       const seam = await callSeam(
         request.name,
         request.input,
-        options.correlationId,
-        options.cookieHeader,
+        ctx.correlationId,
+        ctx.cookieHeader,
       );
 
-      // A step-up challenge ends the run. The human is the only one who can
-      // clear it, so the agent stops rather than retrying or substituting.
       if (seam.status === 403 && seam.body.decision === "challenge") {
-        await event("tool_challenged", {
-          toolName: request.name,
-          message: seam.body.message,
-          detail: {
-            reason: seam.body.reason,
-            wwwAuthenticate: seam.wwwAuthenticate,
-            requiredMaxAge: seam.body.maxAuthAgeSeconds,
-            authAgeSeconds: seam.body.authAgeSeconds,
-          },
-        });
-        await convex().mutation(api.runs.setStatus, {
-          runId,
-          status: "halted",
-          haltedReason: seam.body.reason,
-        });
-        await event("run_finished", {
-          message: "Run paused, waiting for a fresh authentication.",
-        });
-
-        return {
-          runId,
-          correlationId: options.correlationId,
-          status: "halted",
-          message: lastText,
+        return await pauseOnChallenge(
+          ctx,
+          seam,
+          request,
+          messages,
+          lastText,
           toolCalls,
-          challenge: {
-            tool: request.name,
-            reason: seam.body.reason ?? "step_up_required",
-            message: seam.body.message ?? "A fresh authentication is required.",
-            requiredMaxAge: seam.body.maxAuthAgeSeconds,
-            reauthUrl: seam.body.reauthUrl ?? "/api/auth/login?max_age=0&prompt=login&stepUp=1",
-            correlationId: seam.body.correlationId ?? options.correlationId,
-          },
-        };
+        );
       }
 
       if (seam.body.decision === "deny" || seam.status === 401) {
-        await event("tool_denied", {
+        await appendEvent(ctx, "tool_denied", {
           toolName: request.name,
           message: seam.body.message,
           detail: { reason: seam.body.reason },
         });
         await convex().mutation(api.runs.setStatus, {
-          runId,
+          runId: ctx.runId,
           status: "failed",
           haltedReason: seam.body.reason,
         });
-        await event("run_finished", { message: "Run stopped on a denial." });
-
+        await appendEvent(ctx, "run_finished", {
+          message: "Run stopped on a denial.",
+        });
         return {
-          runId,
-          correlationId: options.correlationId,
+          runId: ctx.runId,
+          correlationId: ctx.correlationId,
           status: "failed",
           message: lastText,
           toolCalls,
@@ -293,12 +436,12 @@ export async function runAgent(options: {
         };
       }
 
-      await event("tool_allowed", {
+      await appendEvent(ctx, "tool_allowed", {
         toolName: request.name,
         message: seam.body.message,
         detail: { reason: seam.body.reason },
       });
-      await event("tool_result", {
+      await appendEvent(ctx, "tool_result", {
         toolName: request.name,
         detail: { result: seam.body.result as Record<string, unknown> },
       });
@@ -318,13 +461,100 @@ export async function runAgent(options: {
     messages.push({ role: "user", content: results });
   }
 
-  await convex().mutation(api.runs.setStatus, { runId, status: "failed" });
-  await event("run_finished", { message: "Run stopped at the turn limit." });
+  await convex().mutation(api.runs.setStatus, {
+    runId: ctx.runId,
+    status: "failed",
+  });
+  await appendEvent(ctx, "run_finished", {
+    message: "Run stopped at the turn limit.",
+  });
   return {
-    runId,
-    correlationId: options.correlationId,
+    runId: ctx.runId,
+    correlationId: ctx.correlationId,
     status: "failed",
     message: lastText,
     toolCalls,
+    released,
   };
+}
+
+export async function runAgent(options: {
+  prompt: string;
+  userId: string;
+  cookieHeader: string;
+  correlationId: string;
+}): Promise<AgentOutcome> {
+  const runId = await convex().mutation(api.runs.start, {
+    correlationId: options.correlationId,
+    userId: options.userId,
+    prompt: options.prompt,
+    approvalMode: approvalMode(),
+  });
+
+  return await drive(
+    {
+      runId,
+      correlationId: options.correlationId,
+      cookieHeader: options.cookieHeader,
+    },
+    [{ role: "user", content: options.prompt }],
+  );
+}
+
+/**
+ * Resumes a run that a step-up challenge paused.
+ *
+ * The held tool call is re-presented to the seam under the original
+ * correlationId. Nothing here decides whether it may proceed: the seam
+ * re-reads `auth_time` from the token presented on this request and makes
+ * that call itself. A resume attempted without a genuine re-authentication
+ * therefore meets exactly the same refusal as the original attempt.
+ */
+export async function resumeAgent(options: {
+  runId: Id<"runs">;
+  userId: string;
+  cookieHeader: string;
+  /** `auth_time` observed now, for the audit narrative only. */
+  observedAuthTime?: number;
+}): Promise<AgentOutcome | { error: string; message: string }> {
+  const run = await convex().query(api.runs.get, { runId: options.runId });
+  if (run === null || run.userId !== options.userId) {
+    return { error: "not_found", message: "No such run." };
+  }
+  if (run.status !== "halted" || run.pausedState === undefined) {
+    return {
+      error: "not_paused",
+      message: `This run is ${run.status}; only a paused run can be resumed.`,
+    };
+  }
+
+  const ctx: LoopContext = {
+    runId: options.runId,
+    correlationId: run.correlationId,
+    cookieHeader: options.cookieHeader,
+  };
+
+  // Recorded before the attempt so the trail shows what the human did, and
+  // shows it even when the seam goes on to refuse the resume.
+  await appendEvent(ctx, "reauth_completed", {
+    message:
+      options.observedAuthTime === undefined
+        ? "Resume attempted; no auth_time could be read."
+        : `Resume attempted with auth_time ${options.observedAuthTime}.`,
+    detail: {
+      authTimeAtChallenge: run.challengeAuthTime,
+      authTimeNow: options.observedAuthTime,
+      advanced:
+        run.challengeAuthTime !== undefined &&
+        options.observedAuthTime !== undefined &&
+        options.observedAuthTime > run.challengeAuthTime,
+    },
+  });
+
+  const paused = run.pausedState;
+  return await drive(ctx, paused.messages as Anthropic.MessageParam[], {
+    toolUseId: paused.toolUseId,
+    toolName: paused.toolName,
+    toolInput: paused.toolInput,
+  });
 }
