@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { toClaimsView } from "@/lib/claims-view";
-import { verifyAccessToken, verifyIdToken } from "@/lib/jwt";
+import {
+  decodeWithoutVerification,
+  verifyAccessToken,
+  verifyIdToken,
+} from "@/lib/jwt";
 import { refreshTokens } from "@/lib/oidc";
 import { readSession, saveSession } from "@/lib/session";
 
@@ -40,13 +44,36 @@ export async function POST() {
     );
   }
 
+  /**
+   * The "before" snapshot is decoded without re-verifying.
+   *
+   * This is deliberate and is the only place in the build that reads a token
+   * unverified. The whole point of this route is to observe what a refresh
+   * does once the stored ID token has expired, and re-verifying an expired
+   * token throws — which would make exactly the case worth measuring
+   * impossible to measure.
+   *
+   * It is safe here because the snapshot is a diagnostic baseline, never an
+   * authorisation decision: these tokens were fully verified when they were
+   * stored, and the "after" tokens below are fully verified before any of
+   * this is reported. Nothing downstream trusts the "before" values.
+   */
   const before = {
-    accessToken: toClaimsView(await verifyAccessToken(session.accessToken)),
+    accessToken: decodeWithoutVerification(session.accessToken),
     idToken:
       session.idToken === undefined
-        ? undefined
-        : toClaimsView(await verifyIdToken(session.idToken)),
+        ? null
+        : decodeWithoutVerification(session.idToken),
   };
+  const beforeView = {
+    accessToken:
+      before.accessToken === null ? undefined : toClaimsView(before.accessToken),
+    idToken:
+      before.idToken === null ? undefined : toClaimsView(before.idToken),
+  };
+  const now = Math.floor(Date.now() / 1000);
+  const idTokenWasExpired =
+    before.idToken?.exp !== undefined && before.idToken.exp < now;
 
   let tokens;
   try {
@@ -98,12 +125,12 @@ export async function POST() {
   // `auth_time` lives on the ID token, not the access token, so the
   // comparison must be made there. Comparing access tokens would compare
   // undefined with undefined and report "unchanged" while proving nothing.
-  const authTimeBefore = before.idToken?.authTime;
+  const authTimeBefore = beforeView.idToken?.authTime;
   const authTimeAfter = after.idToken?.authTime;
   const idTokenReturned = tokens.id_token !== undefined;
 
   return NextResponse.json({
-    before,
+    before: beforeView,
     after,
     comparison: {
       authTimeBefore,
@@ -112,8 +139,11 @@ export async function POST() {
       idTokenReturned,
       accessTokenChanged,
       idTokenChanged,
-      issuedAtMoved: before.accessToken.issuedAt !== after.accessToken.issuedAt,
-      tokenIdMoved: before.accessToken.jti !== after.accessToken.jti,
+      /** Whether the stored ID token had already expired when this ran. */
+      idTokenWasExpired,
+      issuedAtMoved:
+        beforeView.accessToken?.issuedAt !== after.accessToken.issuedAt,
+      tokenIdMoved: beforeView.accessToken?.jti !== after.accessToken.jti,
       refreshTokenRotated: tokens.refresh_token !== undefined,
       /**
        * The finding in one line.
