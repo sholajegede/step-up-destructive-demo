@@ -8,13 +8,25 @@
  * @module
  */
 
+import type * as audit from "../audit.js";
+import type * as records from "../records.js";
+import type * as runs from "../runs.js";
+import type * as toolCatalog from "../toolCatalog.js";
+import type * as tools from "../tools.js";
+
 import type {
   ApiFromModules,
   FilterApi,
   FunctionReference,
 } from "convex/server";
 
-declare const fullApi: ApiFromModules<{}>;
+declare const fullApi: ApiFromModules<{
+  audit: typeof audit;
+  records: typeof records;
+  runs: typeof runs;
+  toolCatalog: typeof toolCatalog;
+  tools: typeof tools;
+}>;
 
 /**
  * A utility for referencing Convex functions in your app's public API.
