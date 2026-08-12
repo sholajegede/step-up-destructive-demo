@@ -97,6 +97,41 @@ export const setStatus = mutation({
   },
 });
 
+/**
+ * Freezes a run at a step-up challenge.
+ *
+ * The conversation is stored so the resume continues the same task under the
+ * same correlationId, rather than re-running the prompt from the top.
+ */
+export const pause = mutation({
+  args: {
+    runId: v.id("runs"),
+    haltedReason: v.string(),
+    challengeAuthTime: v.optional(v.number()),
+    pausedState: v.object({
+      messages: v.any(),
+      toolUseId: v.string(),
+      toolName: v.string(),
+      toolInput: v.any(),
+    }),
+  },
+  handler: async (ctx, { runId, ...rest }) => {
+    await ctx.db.patch(runId, { status: "halted", ...rest });
+  },
+});
+
+/** Clears the paused state once a run has resumed past its challenge. */
+export const clearPausedState = mutation({
+  args: { runId: v.id("runs") },
+  handler: async (ctx, { runId }) => {
+    await ctx.db.patch(runId, {
+      status: "running",
+      pausedState: undefined,
+      haltedReason: undefined,
+    });
+  },
+});
+
 export const get = query({
   args: { runId: v.id("runs") },
   handler: async (ctx, { runId }) => ctx.db.get(runId),

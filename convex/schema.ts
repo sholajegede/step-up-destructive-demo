@@ -89,6 +89,31 @@ export default defineSchema({
     startedAt: v.number(),
     endedAt: v.optional(v.number()),
     haltedReason: v.optional(v.string()),
+    /**
+     * The conversation frozen at the moment of a step-up challenge, so the
+     * run resumes the same task rather than starting a new one.
+     *
+     * `messages` is the Anthropic message history up to and including the
+     * assistant turn that requested the held tool. `toolUseId` is the block
+     * the tool result must answer — without it the model's turn would be
+     * malformed on resume.
+     */
+    pausedState: v.optional(
+      v.object({
+        messages: v.any(),
+        toolUseId: v.string(),
+        toolName: v.string(),
+        toolInput: v.any(),
+      }),
+    ),
+    /**
+     * `auth_time` as it stood when the challenge was raised.
+     *
+     * Kept for the audit narrative only. The release decision is made by the
+     * seam re-reading `auth_time` from the presented token; this value is
+     * never what authorises anything.
+     */
+    challengeAuthTime: v.optional(v.number()),
   })
     .index("by_correlationId", ["correlationId"])
     .index("by_userId", ["userId"]),
