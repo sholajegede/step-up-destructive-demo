@@ -9,6 +9,16 @@ export type SessionView = {
   accessTokenError?: string;
   idTokenError?: string;
   hasRefreshToken?: boolean;
+  /**
+   * The claim *names* present on each verified token — never their values.
+   *
+   * `ClaimsView` projects only the claims this build reasons about, so a
+   * claim the provider does send could look absent simply because it is not
+   * projected. Listing the names distinguishes "the provider did not send it"
+   * from "we did not read it", which matters when reporting what can and
+   * cannot be proved about an authentication.
+   */
+  claimNames?: { idToken?: string[]; accessToken?: string[] };
 };
 
 /**
@@ -29,8 +39,12 @@ export async function getSessionView(): Promise<SessionView> {
     hasRefreshToken: session.refreshToken !== undefined,
   };
 
+  const claimNames: { idToken?: string[]; accessToken?: string[] } = {};
+
   try {
-    view.accessToken = toClaimsView(await verifyAccessToken(session.accessToken));
+    const claims = await verifyAccessToken(session.accessToken);
+    view.accessToken = toClaimsView(claims);
+    claimNames.accessToken = Object.keys(claims).sort();
   } catch (error) {
     view.accessTokenError =
       error instanceof Error ? error.message : "Access token invalid.";
@@ -38,12 +52,15 @@ export async function getSessionView(): Promise<SessionView> {
 
   if (session.idToken !== undefined) {
     try {
-      view.idToken = toClaimsView(await verifyIdToken(session.idToken));
+      const claims = await verifyIdToken(session.idToken);
+      view.idToken = toClaimsView(claims);
+      claimNames.idToken = Object.keys(claims).sort();
     } catch (error) {
       view.idTokenError =
         error instanceof Error ? error.message : "ID token invalid.";
     }
   }
 
+  view.claimNames = claimNames;
   return view;
 }
