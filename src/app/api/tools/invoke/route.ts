@@ -81,7 +81,10 @@ export async function POST(request: NextRequest) {
         error: "insufficient_user_authentication",
         // Where the caller sends the human to fix it. The parameters are a
         // hint to the provider; the proof is re-checked here on the retry.
-        reauthUrl: `/api/auth/login?max_age=0&prompt=login&stepUp=1&returnTo=%2Ftools`,
+        // `max_age=0` and `prompt=login` ask the provider for an interactive
+        // re-authentication. They are a hint to the provider, never proof:
+        // the retry is re-checked against `auth_time` by the seam.
+        reauthUrl: `/api/auth/login?max_age=0&prompt=login&stepUp=1&returnTo=%2Fauth-probe`,
       },
       {
         status: 403,
