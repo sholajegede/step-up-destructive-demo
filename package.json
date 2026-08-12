@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "convex run tools:seedRegistry '{}' && convex run records:seedRecords '{}'"
   },
   "dependencies": {
     "convex": "^1.43.0",
