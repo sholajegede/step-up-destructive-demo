@@ -283,37 +283,57 @@ let context: BrowserContext | null = null;
 /**
  * Calls the app carrying the operator's real session.
  *
- * Uses the browser context's request API rather than evaluating a fetch in
- * the page: it shares the same cookie jar, but is independent of whatever the
- * page is doing. Polling through an OAuth redirect would otherwise race the
- * navigation and destroy the execution context mid-call.
+ * The fetch runs inside the page, because the page is unambiguously the thing
+ * holding the operator's cookies — the session cookie is httpOnly and
+ * chunked, and reading it through any other client risks a jar that is subtly
+ * not the same one. The cost is that a call can land mid-navigation during
+ * the OAuth redirect, so a destroyed execution context is retried rather than
+ * treated as a failure.
  */
 async function inSession<T>(
   path: string,
   init: { method?: string; body?: unknown } = {},
 ): Promise<{ status: number; body: T }> {
-  const request = context!.request;
-  const url = `${BASE}${path}`;
-  const options =
-    init.body === undefined
-      ? undefined
-      : {
-          data: init.body,
-          headers: { "Content-Type": "application/json" },
-        };
+  const page = context!.pages()[0];
 
-  const response =
-    (init.method ?? "GET") === "POST"
-      ? await request.post(url, options)
-      : await request.get(url);
-
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      return (await page.evaluate(
+        async ({ path, init }) => {
+          const response = await fetch(path, {
+            method: init.method ?? "GET",
+            headers:
+              init.body === undefined
+                ? undefined
+                : { "Content-Type": "application/json" },
+            body:
+              init.body === undefined ? undefined : JSON.stringify(init.body),
+            cache: "no-store",
+          });
+          let body: unknown = null;
+          try {
+            body = await response.json();
+          } catch {
+            body = null;
+          }
+          return { status: response.status, body };
+        },
+        { path, init },
+      )) as { status: number; body: T };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const navigating =
+        message.includes("Execution context was destroyed") ||
+        message.includes("navigating") ||
+        message.includes("Target closed");
+      if (!navigating || attempt === 6) throw error;
+      await page
+        .waitForLoadState("domcontentloaded", { timeout: 15_000 })
+        .catch(() => undefined);
+      await sleep(750);
+    }
   }
-  return { status: response.status(), body: body as T };
+  throw new Error(`could not call ${path} — the page kept navigating`);
 }
 
 type RunStarted = { runId: string; correlationId: string };
@@ -415,12 +435,32 @@ const OPERATOR_TIMEOUT_MS = 900_000;
 
 async function waitForSignIn(): Promise<SessionView> {
   const deadline = Date.now() + OPERATOR_TIMEOUT_MS;
+  let polls = 0;
   while (Date.now() < deadline) {
-    const { body } = await readSession();
+    const { body } = await readSession().catch(() => ({
+      body: undefined as SessionView | undefined,
+    }));
     if (body?.signedIn === true) return body;
+
+    polls += 1;
+    // Say something on the way, so a stuck poll is visible rather than a
+    // silent fifteen-minute wait ending in a timeout.
+    if (polls % 15 === 0) {
+      const page = context!.pages()[0];
+      const cookies = await context!.cookies(BASE).catch(() => []);
+      info(
+        `still waiting — page is at ${page.url().slice(0, 70)}, ` +
+          `${cookies.length} cookie(s) for ${BASE}` +
+          (cookies.length > 0
+            ? `: ${cookies.map((c) => c.name).join(", ")}`
+            : ""),
+      );
+    }
     await sleep(2000);
   }
-  throw new Error("timed out waiting for sign-in");
+  throw new Error(
+    "timed out waiting for sign-in — the session cookie never became readable",
+  );
 }
 
 // ---------------------------------------------------------------------------
