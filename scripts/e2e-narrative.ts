@@ -385,7 +385,21 @@ async function waitForSettled(
   );
 }
 
-async function resumeRun(runId: string): Promise<RunDoc> {
+/**
+ * Resumes a paused run and waits for the seam to have actually ruled on it.
+ *
+ * Waiting on run status alone is not enough: a refused resume returns the run
+ * to `halted`, which is the state it started in, so a poll can read "settled"
+ * before any work happened and assert against the *previous* outcome. The
+ * audit trail is the unambiguous signal — a new row means the seam was
+ * consulted and reached a decision.
+ */
+async function resumeRun(
+  runId: string,
+  correlationId: string,
+): Promise<RunDoc> {
+  const before = (await auditFor(correlationId)).length;
+
   const response = await inSession<{ accepted?: boolean }>(
     `/api/agent/run/${runId}/resume`,
     { method: "POST" },
@@ -393,6 +407,18 @@ async function resumeRun(runId: string): Promise<RunDoc> {
   if (response.status !== 202) {
     throw new Error(`resume was not accepted: HTTP ${response.status}`);
   }
+
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if ((await auditFor(correlationId)).length > before) break;
+    await sleep(1500);
+  }
+  if ((await auditFor(correlationId)).length === before) {
+    throw new Error(
+      "the resume produced no new audit row — the seam was never consulted",
+    );
+  }
+
   return await waitForSettled(runId);
 }
 
@@ -680,7 +706,7 @@ async function main(): Promise<void> {
     "auth_time is byte-identical after a machine-to-machine refresh",
   );
 
-  const refusedRun = await resumeRun(held.runId);
+  const refusedRun = await resumeRun(held.runId, held.correlationId);
   assertEqual(
     refusedRun.status,
     "halted",
@@ -731,7 +757,7 @@ async function main(): Promise<void> {
   );
   info(`auth_time ${authTimeBefore} → ${authTimeAfter}`);
 
-  const releasedRun = await resumeRun(held.runId);
+  const releasedRun = await resumeRun(held.runId, held.correlationId);
   assert(
     releasedRun.status === "completed",
     "the resumed run completed",

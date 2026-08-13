@@ -609,6 +609,11 @@ export async function resumeAgent(options: {
     cookieHeader: options.cookieHeader,
   };
 
+  // The run is working again from here, whatever the seam goes on to decide.
+  await withRetry(`mark run ${options.runId} resuming`, () =>
+    convex().mutation(api.runs.markResuming, { runId: options.runId }),
+  );
+
   // Recorded before the attempt so the trail shows what the human did, and
   // shows it even when the seam goes on to refuse the resume.
   await appendEvent(ctx, "reauth_completed", {

@@ -120,6 +120,25 @@ export const pause = mutation({
   },
 });
 
+/**
+ * Marks a paused run as working again.
+ *
+ * Set at the start of a resume, before the seam is consulted. Without it a
+ * resume that is refused leaves the run reading "halted" for its whole
+ * duration — the console shows a frozen state while work is happening, and
+ * anything watching for the run to settle sees it as already settled and
+ * reads the previous outcome.
+ *
+ * `pausedState` is deliberately preserved: the held call is still held until
+ * the seam says otherwise.
+ */
+export const markResuming = mutation({
+  args: { runId: v.id("runs") },
+  handler: async (ctx, { runId }) => {
+    await ctx.db.patch(runId, { status: "running", haltedReason: undefined });
+  },
+});
+
 /** Clears the paused state once a run has resumed past its challenge. */
 export const clearPausedState = mutation({
   args: { runId: v.id("runs") },
