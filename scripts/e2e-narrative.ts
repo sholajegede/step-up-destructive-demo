@@ -280,33 +280,40 @@ const resetDemo = () =>
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 
-/** Runs a fetch inside the browser so the session cookie is carried. */
+/**
+ * Calls the app carrying the operator's real session.
+ *
+ * Uses the browser context's request API rather than evaluating a fetch in
+ * the page: it shares the same cookie jar, but is independent of whatever the
+ * page is doing. Polling through an OAuth redirect would otherwise race the
+ * navigation and destroy the execution context mid-call.
+ */
 async function inSession<T>(
   path: string,
   init: { method?: string; body?: unknown } = {},
 ): Promise<{ status: number; body: T }> {
-  const page = context!.pages()[0];
-  return await page.evaluate(
-    async ({ path, init }) => {
-      const response = await fetch(path, {
-        method: init.method ?? "GET",
-        headers:
-          init.body === undefined
-            ? undefined
-            : { "Content-Type": "application/json" },
-        body: init.body === undefined ? undefined : JSON.stringify(init.body),
-        cache: "no-store",
-      });
-      let body: unknown = null;
-      try {
-        body = await response.json();
-      } catch {
-        body = null;
-      }
-      return { status: response.status, body };
-    },
-    { path, init },
-  ) as { status: number; body: T };
+  const request = context!.request;
+  const url = `${BASE}${path}`;
+  const options =
+    init.body === undefined
+      ? undefined
+      : {
+          data: init.body,
+          headers: { "Content-Type": "application/json" },
+        };
+
+  const response =
+    (init.method ?? "GET") === "POST"
+      ? await request.post(url, options)
+      : await request.get(url);
+
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return { status: response.status(), body: body as T };
 }
 
 type RunStarted = { runId: string; correlationId: string };
