@@ -230,12 +230,48 @@ async function startServer(mode: "step-up" | "blanket"): Promise<void> {
 // Deployment reads — the source of truth for every assertion
 // ---------------------------------------------------------------------------
 
+/**
+ * Retries a deployment read/write through a transient network fault.
+ *
+ * This hardens the harness, not the assertions. The values every assertion
+ * compares are still read truthfully from the deployment — a connect timeout
+ * on the way to Convex says nothing about whether the seam behaved, and
+ * failing the narrative on one would report a network blip as a security
+ * regression.
+ */
+async function resilient<T>(label: string, call: () => Promise<T>): Promise<T> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      return await call();
+    } catch (error) {
+      last = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const transient =
+        message.includes("fetch failed") ||
+        message.includes("timeout") ||
+        message.includes("ECONNRESET") ||
+        message.includes("ETIMEDOUT");
+      if (!transient || attempt === 5) break;
+      info(`${label}: transient network fault, retrying (${attempt}/4)`);
+      await sleep(1500 * attempt);
+    }
+  }
+  throw last;
+}
+
 const auditFor = (correlationId: string) =>
-  convex.query(api.audit.byCorrelationId, { correlationId });
+  resilient("audit read", () =>
+    convex.query(api.audit.byCorrelationId, { correlationId }),
+  );
 
-const metrics = () => convex.query(api.audit.metrics, {});
+const metrics = () => resilient("metrics read", () => convex.query(api.audit.metrics, {}));
 
-const recordByRef = (ref: string) => convex.query(api.records.getByRef, { ref });
+const recordByRef = (ref: string) =>
+  resilient(`record ${ref}`, () => convex.query(api.records.getByRef, { ref }));
+
+const resetDemo = () =>
+  resilient("reset", () => convex.mutation(api.records.resetDemo, {}));
 
 // ---------------------------------------------------------------------------
 // Browser-driven calls — the operator's real session
@@ -305,7 +341,9 @@ async function waitForSettled(
   const deadline = Date.now() + timeoutMs;
   let last: RunDoc | null = null;
   while (Date.now() < deadline) {
-    const run = await convex.query(api.runs.get, { runId });
+    const run = await resilient("run read", () =>
+      convex.query(api.runs.get, { runId }),
+    );
     if (run !== null) {
       last = run;
       if (run.status !== "running") return run;
@@ -364,7 +402,7 @@ async function main(): Promise<void> {
   // -- Step 1 --------------------------------------------------------------
   step(1, "Clean slate");
   await startServer("step-up");
-  await convex.mutation(api.records.resetDemo, {});
+  await resetDemo();
 
   const opening = await metrics();
   assertEqual(opening.executedWithoutFreshAuth, 0, "escapes start at 0");
@@ -467,7 +505,7 @@ async function main(): Promise<void> {
 
   // -- Step 4 --------------------------------------------------------------
   step(4, "Step-up mode — the same task is held");
-  await convex.mutation(api.records.resetDemo, {});
+  await resetDemo();
   await startServer("step-up");
 
   const resetMetrics = await metrics();
