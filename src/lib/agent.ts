@@ -551,12 +551,21 @@ export async function createRun(options: {
   userId: string;
   correlationId: string;
 }): Promise<Id<"runs">> {
-  return await convex().mutation(api.runs.start, {
-    correlationId: options.correlationId,
-    userId: options.userId,
-    prompt: options.prompt,
-    approvalMode: approvalMode(),
-  });
+  // Retried like the other run-state writes: a transient fault here fails the
+  // operator's very first action, which reads as "the app is broken" rather
+  // than "the network hiccuped".
+  const runId = await withRetry("open run", () =>
+    convex().mutation(api.runs.start, {
+      correlationId: options.correlationId,
+      userId: options.userId,
+      prompt: options.prompt,
+      approvalMode: approvalMode(),
+    }),
+  );
+  if (runId === undefined) {
+    throw new Error("could not open a run — the store did not accept it");
+  }
+  return runId;
 }
 
 /** Drives an already-opened run to its first stopping point. */
