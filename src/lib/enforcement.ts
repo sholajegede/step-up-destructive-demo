@@ -97,6 +97,8 @@ const MESSAGES: Record<DecisionReason, string> = {
     "The token carries no record of how the person authenticated, so the required method cannot be proved.",
   audit_unavailable:
     "The decision could not be recorded, so it was refused. An action that cannot be audited must not run.",
+  registry_unavailable:
+    "The tool registry could not be read, so the policy for this tool is unknown and the call was refused.",
 };
 
 /**
@@ -211,9 +213,21 @@ export async function enforceToolCall(
   observed.tokenId = accessClaims.jti;
 
   // 2. Registry lookup. An unregistered name has no policy, so it is refused.
-  const tool = await convex().query(api.tools.getByName, {
-    name: context.toolName,
-  });
+  //
+  //    A registry that cannot be read is refused for the same reason: without
+  //    it there is no way to know whether this tool is destructive or what
+  //    window it carries, and guessing in either direction is worse than
+  //    stopping. The refusal still writes an audit row — through the spool if
+  //    the store is what is down — so the outage leaves a record instead of a
+  //    hole.
+  let tool;
+  try {
+    tool = await convex().query(api.tools.getByName, {
+      name: context.toolName,
+    });
+  } catch {
+    return await finish("deny", "registry_unavailable");
+  }
   if (tool === null) {
     return await finish("deny", "unknown_tool");
   }

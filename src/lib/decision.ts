@@ -29,7 +29,8 @@ export type DecisionReason =
   | "registry_defect"
   | "mfa_required"
   | "amr_unprovable"
-  | "audit_unavailable";
+  | "audit_unavailable"
+  | "registry_unavailable";
 
 export type DecisionInput = {
   destructive: boolean;
