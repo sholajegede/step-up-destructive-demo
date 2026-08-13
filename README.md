@@ -177,7 +177,8 @@ npm install
 npx convex dev --once
 ```
 
-This writes `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL` to `.env.local`.
+The first run asks you to sign in and to select or create a project. It then
+writes `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL` to `.env.local`.
 
 ### 3. Set up Kinde
 
@@ -264,12 +265,22 @@ Use **Reset demo** to restore the records and clear the trail.
 
 One script walks the whole story and checks the result at each step.
 
+The script drives a real browser. Install the browser once:
+
+```bash
+npx playwright install chromium
+```
+
+Then run the script:
+
 ```bash
 npm run e2e
 ```
 
-It opens a browser. Sign in when it asks. It then runs without help until it
-asks you to re-authenticate once. Every check reads the deployment back —
+It opens a browser window named **Google Chrome for Testing**. Sign in when it
+asks. It then runs without help until it asks you to re-authenticate once. It
+saves the session to `.e2e-auth.json`, so a later run does not ask you to sign
+in again. Every check reads the deployment back —
 audit rows, record state, and counters — not the HTTP status.
 
 The script:
