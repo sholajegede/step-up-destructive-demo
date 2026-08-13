@@ -1,15 +1,12 @@
 # Records Console
 
-An operations console where an AI agent does read-only work freely, and every
-destructive action is held until a person proves they are present.
+This is an operations console where an AI agent does read-only work freely, and every destructive action is held until a person proves they are present.
 
 The agent can list, read, and summarise records without interruption. When it
 tries to delete a document, refund an invoice, or deploy a release, the server
 checks how long ago a human actually authenticated. If that was too long ago,
 the action is held and the person is asked to re-authenticate. The agent
 cannot proceed until they do.
-
----
 
 ## The problem
 
@@ -32,8 +29,6 @@ This console takes a different line:
 
 The number to watch is **executed without fresh auth**. It is on the console.
 It must be zero.
-
----
 
 ## The security model
 
@@ -123,8 +118,6 @@ so the whole story reads as one trail.
 
 An action that cannot be recorded does not run.
 
----
-
 ## Honest limitations
 
 **The console proves *when* a person authenticated. It cannot prove *how*.**
@@ -150,8 +143,6 @@ and replayed when the store returns. A decision is therefore never *silently*
 lost. But that file lives on one host and does not survive it. A production
 deployment wants a durable queue with its own availability guarantees.
 
----
-
 ## Requirements
 
 - Node.js 22 or later
@@ -160,8 +151,6 @@ deployment wants a durable queue with its own availability guarantees.
 - An Anthropic API key
 
 All keys must be your own. Do not use a key from a shared or example account.
-
----
 
 ## Setup
 
@@ -229,8 +218,6 @@ npx convex run tools:seedRegistry '{}'
 npx convex run records:seedRecords '{}'
 ```
 
----
-
 ## Run it
 
 ```bash
@@ -258,8 +245,6 @@ Run the same task. The destructive action executes with no re-authentication.
 The **executed without fresh auth** counter increases.
 
 Use **Reset demo** to restore the records and clear the trail.
-
----
 
 ## The end-to-end narrative
 
@@ -300,8 +285,6 @@ prints the expected and actual values.
 It changes `APPROVAL_MODE` by restarting the server, because the mode is a
 property of the deployment. It never sends the mode on a request.
 
----
-
 ## Other commands
 
 ```bash
@@ -312,8 +295,6 @@ npm run build     # production build
 
 `GET /api/health` reports liveness, which configuration groups are present
 (never their values), the resolved approval mode, and the audit-spool depth.
-
----
 
 ## Deploying
 
@@ -332,8 +313,6 @@ is a demonstration setting and must not be used with real data.
 The audit spool is a local file. On a platform with a read-only or ephemeral
 filesystem, set `AUDIT_SPOOL_FILE` to a writable path, or replace the spool
 with a durable queue before relying on it.
-
----
 
 ## Licence
 
