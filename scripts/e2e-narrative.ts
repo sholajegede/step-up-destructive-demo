@@ -24,8 +24,72 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { ConvexHttpClient } from "convex/browser";
+import { anyApi, type FunctionReference } from "convex/server";
 import { chromium, type Browser, type BrowserContext } from "playwright";
-import { api } from "../convex/_generated/api";
+
+/**
+ * `convex/_generated/api` re-exports `anyApi` verbatim, but it sits under the
+ * project's CommonJS package scope while this script runs as ESM. Referencing
+ * `anyApi` directly is the same object without the module-format mismatch.
+ */
+type AuditRow = {
+  correlationId: string;
+  toolName: string;
+  destructive: boolean;
+  decision: "allow" | "challenge" | "deny";
+  reason: string;
+  approvalMode: "step-up" | "blanket";
+  authAgeSeconds?: number;
+  maxAuthAgeSeconds?: number;
+};
+
+type Metrics = {
+  safeCalls: number;
+  destructiveAttempts: number;
+  challenged: number;
+  denied: number;
+  executedWithoutFreshAuth: number;
+};
+
+type RecordDoc = {
+  ref: string;
+  status: string;
+  deletedAt?: number;
+  refundedAt?: number;
+  deployedAt?: number;
+};
+
+type RunDoc = {
+  status: "running" | "halted" | "completed" | "failed";
+  correlationId: string;
+  haltedReason?: string;
+};
+
+type Args = Record<string, unknown>;
+type Query<A extends Args, Result> = FunctionReference<
+  "query",
+  "public",
+  A,
+  Result
+>;
+type Mutation<A extends Args, Result> = FunctionReference<
+  "mutation",
+  "public",
+  A,
+  Result
+>;
+
+const api = anyApi as unknown as {
+  audit: {
+    byCorrelationId: Query<{ correlationId: string }, AuditRow[]>;
+    metrics: Query<Record<string, never>, Metrics>;
+  };
+  records: {
+    resetDemo: Mutation<Record<string, never>, unknown>;
+    getByRef: Query<{ ref: string }, RecordDoc | null>;
+  };
+  runs: { get: Query<{ runId: string }, RunDoc | null> };
+};
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -166,32 +230,12 @@ async function startServer(mode: "step-up" | "blanket"): Promise<void> {
 // Deployment reads — the source of truth for every assertion
 // ---------------------------------------------------------------------------
 
-type AuditRow = {
-  correlationId: string;
-  toolName: string;
-  destructive: boolean;
-  decision: "allow" | "challenge" | "deny";
-  reason: string;
-  approvalMode: "step-up" | "blanket";
-  authAgeSeconds?: number;
-  maxAuthAgeSeconds?: number;
-};
-
 const auditFor = (correlationId: string) =>
-  convex.query(api.audit.byCorrelationId, {
-    correlationId,
-  }) as Promise<AuditRow[]>;
+  convex.query(api.audit.byCorrelationId, { correlationId });
 
 const metrics = () => convex.query(api.audit.metrics, {});
 
-const recordByRef = (ref: string) =>
-  convex.query(api.records.getByRef, { ref }) as Promise<{
-    ref: string;
-    status: string;
-    deletedAt?: number;
-    refundedAt?: number;
-    deployedAt?: number;
-  } | null>;
+const recordByRef = (ref: string) => convex.query(api.records.getByRef, { ref });
 
 // ---------------------------------------------------------------------------
 // Browser-driven calls — the operator's real session
@@ -230,11 +274,6 @@ async function inSession<T>(
 }
 
 type RunStarted = { runId: string; correlationId: string };
-type RunDoc = {
-  status: "running" | "halted" | "completed" | "failed";
-  correlationId: string;
-  haltedReason?: string;
-};
 
 /** Starts a run and waits for it to stop moving. */
 async function runTask(prompt: string): Promise<{
@@ -266,9 +305,7 @@ async function waitForSettled(
   const deadline = Date.now() + timeoutMs;
   let last: RunDoc | null = null;
   while (Date.now() < deadline) {
-    const run = (await convex.query(api.runs.get, {
-      runId: runId as never,
-    })) as RunDoc | null;
+    const run = await convex.query(api.runs.get, { runId });
     if (run !== null) {
       last = run;
       if (run.status !== "running") return run;
@@ -298,8 +335,11 @@ type SessionView = {
 
 const readSession = () => inSession<SessionView>("/api/auth/session");
 
+/** Manual beats wait generously — a person may not be at the keyboard. */
+const OPERATOR_TIMEOUT_MS = 900_000;
+
 async function waitForSignIn(): Promise<SessionView> {
-  const deadline = Date.now() + 300_000;
+  const deadline = Date.now() + OPERATOR_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const { body } = await readSession();
     if (body?.signedIn === true) return body;
@@ -325,14 +365,20 @@ async function main(): Promise<void> {
   step(1, "Clean slate");
   await startServer("step-up");
   await convex.mutation(api.records.resetDemo, {});
-  await page.goto(BASE);
 
   const opening = await metrics();
   assertEqual(opening.executedWithoutFreshAuth, 0, "escapes start at 0");
   assertEqual(opening.destructiveAttempts, 0, "no destructive attempts yet");
 
+  // Land the operator directly on the provider rather than on a page with a
+  // button they have to find. The window is a fresh browser profile, so there
+  // is no existing session to reuse.
+  await page.goto(`${BASE}/api/auth/login?returnTo=%2F`);
   console.log(
-    `\n   ${YELLOW}▶ Sign in in the browser window that just opened.${RESET}`,
+    `\n   ${YELLOW}${BOLD}▶ OPERATOR: sign in.${RESET}\n` +
+      `   ${YELLOW}A Chromium window has opened at the Kinde sign-in page.${RESET}\n` +
+      `   ${DIM}It is a fresh browser profile, so your usual session does not apply.${RESET}\n` +
+      `   ${DIM}Waiting up to ${OPERATOR_TIMEOUT_MS / 60_000} minutes…${RESET}`,
   );
   const session = await waitForSignIn();
   info(`signed in as ${session.idToken?.email ?? session.idToken?.sub}`);
@@ -514,13 +560,15 @@ async function main(): Promise<void> {
   step(6, "The release — only a real human re-authentication opens the gate");
   const reauthUrl = `${BASE}/api/auth/login?max_age=0&prompt=login&stepUp=1&returnTo=%2F`;
   console.log(
-    `\n   ${YELLOW}▶ Re-authenticate in the browser window.${RESET}\n` +
-      `   ${DIM}Opening: ${reauthUrl}${RESET}\n` +
-      `   ${DIM}Waiting for auth_time to advance past ${authTimeBefore}…${RESET}`,
+    `\n   ${YELLOW}${BOLD}▶ OPERATOR: re-authenticate.${RESET}\n` +
+      `   ${YELLOW}The Chromium window is now on the Kinde sign-in page again.${RESET}\n` +
+      `   ${DIM}This is the step the whole build turns on: the action stays held${RESET}\n` +
+      `   ${DIM}until a person proves presence. Waiting for auth_time to advance${RESET}\n` +
+      `   ${DIM}past ${authTimeBefore}, up to ${OPERATOR_TIMEOUT_MS / 60_000} minutes…${RESET}`,
   );
   await page.goto(reauthUrl);
 
-  const deadline = Date.now() + 300_000;
+  const deadline = Date.now() + OPERATOR_TIMEOUT_MS;
   let authTimeAfter: number | undefined;
   while (Date.now() < deadline) {
     const now = await readSession().catch(() => null);
@@ -636,6 +684,10 @@ main()
       console.error(
         `\n   ${RED}✗ ERROR${RESET}\n   ${RED}${error instanceof Error ? error.message : String(error)}${RESET}`,
       );
+      if (error instanceof Error) {
+        if (error.cause !== undefined) console.error(`   cause: ${String((error.cause as Error)?.message ?? error.cause)}`);
+        console.error(`   ${DIM}${error.stack?.split("\n").slice(1, 5).join("\n   ")}${RESET}`);
+      }
     }
     console.error(
       `\n${RED}${BOLD}FAIL${RESET} — stopped after ${assertions} passing assertions.`,
