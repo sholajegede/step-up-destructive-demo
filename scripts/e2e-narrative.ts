@@ -618,8 +618,12 @@ async function main(): Promise<void> {
     "reset cleared the trail",
   );
 
+  // `deploy_release` also carries a 120s window, so the authentication aged
+  // in step 3 is already past it. Using `delete_record` here would be wrong:
+  // its window is 300s, the authentication is younger than that, and step-up
+  // would correctly *allow* the call — a pass, not a halt.
   const held = await runTask(
-    "Delete the superseded vendor contract document, DOC-3303.",
+    "Deploy release REL-2026-08-03 to production.",
   );
   assertEqual(held.run.status, "halted", "the run halted instead of acting");
 
@@ -639,10 +643,10 @@ async function main(): Promise<void> {
     "no destructive call was allowed",
   );
 
-  const stillThere = await recordByRef("DOC-3303");
+  const stillThere = await recordByRef("REL-2026-08-03");
   assert(
-    stillThere?.deletedAt === undefined,
-    "the record is untouched — nothing executed",
+    stillThere?.deployedAt === undefined,
+    "the release was not deployed — nothing executed",
   );
   assertEqual(
     (await metrics()).executedWithoutFreshAuth,
@@ -693,8 +697,8 @@ async function main(): Promise<void> {
     "still nothing destructive allowed",
   );
   assert(
-    (await recordByRef("DOC-3303"))?.deletedAt === undefined,
-    "the record is still untouched after the refresh-only retry",
+    (await recordByRef("REL-2026-08-03"))?.deployedAt === undefined,
+    "the release is still undeployed after the refresh-only retry",
   );
 
   // -- Step 6 --------------------------------------------------------------
@@ -751,10 +755,15 @@ async function main(): Promise<void> {
     `age ${releases[0]?.authAgeSeconds}s vs window ${releases[0]?.maxAuthAgeSeconds}s`,
   );
 
-  const finallyDeleted = await recordByRef("DOC-3303");
+  const deployed = await recordByRef("REL-2026-08-03");
   assert(
-    finallyDeleted?.deletedAt !== undefined,
-    "the record changed — the action executed for real",
+    deployed?.deployedAt !== undefined,
+    "the release was deployed — the action executed for real",
+  );
+  assert(
+    deployed?.status.includes("production") === true,
+    "it was deployed to the environment the task named",
+    `status: ${deployed?.status}`,
   );
 
   // -- Step 7 --------------------------------------------------------------
