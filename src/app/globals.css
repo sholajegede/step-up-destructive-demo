@@ -1,26 +1,102 @@
 @import "tailwindcss";
 
+/**
+ * One palette, defined once on :root, redefined only where the scheme flips.
+ * Semantic names rather than raw colours, so a decision's meaning drives its
+ * appearance: allow is calm, challenge is a held state (not a failure), deny
+ * and escaped are alarming.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  --background: #fbfbfa;
+  --surface: #ffffff;
+  --surface-muted: #f4f4f2;
+  --foreground: #16181d;
+  --muted: #6b7280;
+  --border: #e4e4e1;
+  --border-strong: #d3d3ce;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --accent: #1c1f26;
+  --accent-foreground: #ffffff;
+
+  --allow: #0f7a4d;
+  --allow-bg: #e9f6ef;
+  --challenge: #9a5b00;
+  --challenge-bg: #fdf3e2;
+  --deny: #b3261e;
+  --deny-bg: #fcecea;
+  --escaped: #b3261e;
+  --escaped-bg: #fcecea;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0c0d10;
+    --surface: #141619;
+    --surface-muted: #1b1e23;
+    --foreground: #ececef;
+    --muted: #9ba1ac;
+    --border: #262a30;
+    --border-strong: #363b43;
+
+    --accent: #ececef;
+    --accent-foreground: #0c0d10;
+
+    --allow: #4ade80;
+    --allow-bg: #10261b;
+    --challenge: #fbbf24;
+    --challenge-bg: #2a1f08;
+    --deny: #f87171;
+    --deny-bg: #2a1210;
+    --escaped: #f87171;
+    --escaped-bg: #2a1210;
   }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-allow: var(--allow);
+  --color-allow-bg: var(--allow-bg);
+  --color-challenge: var(--challenge);
+  --color-challenge-bg: var(--challenge-bg);
+  --color-deny: var(--deny);
+  --color-deny-bg: var(--deny-bg);
+  --color-escaped: var(--escaped);
+  --color-escaped-bg: var(--escaped-bg);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* New timeline rows arrive while the operator is watching; a brief tint makes
+   the arrival legible without moving anything. */
+@keyframes arrive {
+  from {
+    background-color: var(--surface-muted);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.arrive {
+  animation: arrive 900ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arrive {
+    animation: none;
+  }
 }
