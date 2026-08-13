@@ -94,7 +94,12 @@ function TimelineRow({ event }: { event: RunEvent }) {
   const detail = (event.detail ?? {}) as Record<string, unknown>;
   const tone = TONES[event.type];
   const age = detail.authAgeSeconds as number | undefined;
-  const window = detail.requiredMaxAge as number | undefined;
+  // Every decision event reports `maxAuthAgeSeconds`. `requiredMaxAge` is the
+  // older field name and is still read so rows written before it was
+  // normalised keep rendering their window.
+  const window = (detail.maxAuthAgeSeconds ?? detail.requiredMaxAge) as
+    | number
+    | undefined;
   const amr = detail.amr as string[] | undefined;
 
   return (
@@ -202,7 +207,9 @@ export function useHeldChallenge(runId: Id<"runs"> | null): {
   return {
     tool: held.toolName,
     reason: detail.reason as string | undefined,
-    requiredMaxAge: detail.requiredMaxAge as number | undefined,
+    requiredMaxAge: (detail.maxAuthAgeSeconds ?? detail.requiredMaxAge) as
+      | number
+      | undefined,
     authAgeSeconds: detail.authAgeSeconds as number | undefined,
   };
 }

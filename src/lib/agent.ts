@@ -227,7 +227,11 @@ async function pauseOnChallenge(
     detail: {
       reason: seam.body.reason,
       wwwAuthenticate: seam.wwwAuthenticate,
+      // `requiredMaxAge` is the value the RFC 9470 challenge carries.
+      // `maxAuthAgeSeconds` is the field every decision event reports, so an
+      // allowed row and a held row read the same way in the timeline.
       requiredMaxAge: seam.body.maxAuthAgeSeconds,
+      maxAuthAgeSeconds: seam.body.maxAuthAgeSeconds,
       authAgeSeconds: seam.body.authAgeSeconds,
     },
   });
@@ -498,7 +502,12 @@ async function drive(
       await appendEvent(ctx, "tool_allowed", {
         toolName: request.name,
         message: seam.body.message,
-        detail: { reason: seam.body.reason },
+        detail: {
+          reason: seam.body.reason,
+          authAgeSeconds: seam.body.authAgeSeconds,
+          maxAuthAgeSeconds: seam.body.maxAuthAgeSeconds,
+          amr: seam.body.amr,
+        },
       });
       await appendEvent(ctx, "tool_result", {
         toolName: request.name,
