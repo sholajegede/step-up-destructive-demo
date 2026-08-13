@@ -445,9 +445,12 @@ async function waitUntilAuthStale(windowSeconds: number): Promise<number> {
   let age = 0;
   while (Date.now() < deadline) {
     const { body } = await readSession();
-    const authTime = body.idToken?.authTime;
+    const authTime = body?.idToken?.authTime;
     if (authTime === undefined) {
-      throw new Error("auth_time is not readable; cannot age the session");
+      // A transient non-JSON response (a redirect in flight) is not a reason
+      // to abandon the wait.
+      await sleep(3000);
+      continue;
     }
     age = Math.floor(Date.now() / 1000) - authTime;
     if (age > target) return age;
