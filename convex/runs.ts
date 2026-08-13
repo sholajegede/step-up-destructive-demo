@@ -132,6 +132,23 @@ export const clearPausedState = mutation({
   },
 });
 
+/**
+ * A person's runs, newest first.
+ *
+ * Read from the browser for the live run list. The seam is what protects
+ * destructive actions; this read path only shapes what the console displays.
+ */
+export const listByUser = query({
+  args: { userId: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, { userId, limit }) => {
+    return await ctx.db
+      .query("runs")
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(limit ?? 20);
+  },
+});
+
 export const get = query({
   args: { runId: v.id("runs") },
   handler: async (ctx, { runId }) => ctx.db.get(runId),

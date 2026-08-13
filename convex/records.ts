@@ -193,6 +193,41 @@ export const deploy = mutation({
   },
 });
 
+/**
+ * Resets the demo to a clean slate: records restored, and the run history and
+ * audit trail cleared.
+ *
+ * The audit trail is cleared here because these counters are
+ * deployment-wide — without a reset, one earlier blanket-mode run leaves
+ * `executedWithoutFreshAuth` permanently non-zero and the operator can never
+ * see the number that step-up is supposed to hold at zero.
+ *
+ * This is a demo affordance, and the only thing in the build that deletes an
+ * audit row. Nothing on the agent's path can reach it: it is not a registered
+ * tool, so the seam never brokers it and the model cannot call it.
+ */
+export const resetDemo = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const tables = ["auditLog", "runEvents", "runs", "records"] as const;
+    const cleared: Record<string, number> = {};
+
+    for (const table of tables) {
+      const rows = await ctx.db.query(table).collect();
+      for (const row of rows) {
+        await ctx.db.delete(row._id);
+      }
+      cleared[table] = rows.length;
+    }
+
+    for (const record of SEED_RECORDS) {
+      await ctx.db.insert("records", record);
+    }
+
+    return { cleared, seeded: SEED_RECORDS.length };
+  },
+});
+
 export const seedRecords = mutation({
   args: {},
   handler: async (ctx) => {
