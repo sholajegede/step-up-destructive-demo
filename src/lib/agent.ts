@@ -150,6 +150,35 @@ type LoopContext = {
 };
 
 /**
+ * Retries a Convex write briefly.
+ *
+ * Used for the writes that decide what an operator sees: a run left stuck at
+ * "running" because its closing status write hit a blip is a run that looks
+ * broken when it is not. The audit trail has its own, stronger durability
+ * path in `audit-sink.ts`; this is only about the run's own state.
+ */
+async function withRetry<T>(
+  label: string,
+  operation: () => Promise<T>,
+): Promise<T | undefined> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === 3) {
+        console.error(
+          `[agent] ${label} failed after ${attempt} attempts:`,
+          error instanceof Error ? error.message : error,
+        );
+        return undefined;
+      }
+      await new Promise((r) => setTimeout(r, 120 * 2 ** (attempt - 1)));
+    }
+  }
+  return undefined;
+}
+
+/**
  * Appends a timeline event. Best-effort by design.
  *
  * `runEvents` is display telemetry: it drives the console timeline. The
@@ -172,20 +201,15 @@ async function appendEvent(
     detail?: Record<string, unknown>;
   },
 ): Promise<void> {
-  try {
-    await convex().mutation(api.runs.appendEvent, {
+  await withRetry(`timeline write "${type}" for run ${ctx.runId}`, () =>
+    convex().mutation(api.runs.appendEvent, {
       runId: ctx.runId,
       type,
       toolName: detail.toolName,
       message: detail.message,
       detail: detail.detail,
-    });
-  } catch (error) {
-    console.error(
-      `[run ${ctx.runId}] timeline write failed for "${type}":`,
-      error instanceof Error ? error.message : error,
-    );
-  }
+    }),
+  );
 }
 
 /** Freezes the conversation at a challenge and returns the halted outcome. */
@@ -208,17 +232,19 @@ async function pauseOnChallenge(
     },
   });
 
-  await convex().mutation(api.runs.pause, {
-    runId: ctx.runId,
-    haltedReason: seam.body.reason ?? "step_up_required",
+  await withRetry(`pause run ${ctx.runId}`, () =>
+    convex().mutation(api.runs.pause, {
+      runId: ctx.runId,
+      haltedReason: seam.body.reason ?? "step_up_required",
     challengeAuthTime: seam.body.authTime,
-    pausedState: {
-      messages,
-      toolUseId: request.id,
-      toolName: request.name,
-      toolInput: request.input,
-    },
-  });
+      pausedState: {
+        messages,
+        toolUseId: request.id,
+        toolName: request.name,
+        toolInput: request.input,
+      },
+    }),
+  );
 
   await appendEvent(ctx, "run_finished", {
     message: "Run paused, waiting for a fresh authentication.",
@@ -302,11 +328,13 @@ async function drive(
         message: seam.body.message,
         detail: { reason: seam.body.reason },
       });
-      await convex().mutation(api.runs.setStatus, {
-        runId: ctx.runId,
-        status: "failed",
-        haltedReason: seam.body.reason,
-      });
+      await withRetry(`fail run ${ctx.runId}`, () =>
+        convex().mutation(api.runs.setStatus, {
+          runId: ctx.runId,
+          status: "failed",
+          haltedReason: seam.body.reason,
+        }),
+      );
       await appendEvent(ctx, "run_finished", {
         message: "Run stopped on a denial.",
       });
@@ -324,7 +352,9 @@ async function drive(
       };
     }
 
-    await convex().mutation(api.runs.clearPausedState, { runId: ctx.runId });
+    await withRetry(`clear paused state on run ${ctx.runId}`, () =>
+      convex().mutation(api.runs.clearPausedState, { runId: ctx.runId }),
+    );
     await appendEvent(ctx, "tool_allowed", {
       toolName: pending.toolName,
       message: seam.body.message,
@@ -386,10 +416,12 @@ async function drive(
     }
 
     if (response.stop_reason !== "tool_use") {
-      await convex().mutation(api.runs.setStatus, {
-        runId: ctx.runId,
-        status: "completed",
-      });
+      await withRetry(`complete run ${ctx.runId}`, () =>
+        convex().mutation(api.runs.setStatus, {
+          runId: ctx.runId,
+          status: "completed",
+        }),
+      );
       await appendEvent(ctx, "run_finished", { message: "Run completed." });
       return {
         runId: ctx.runId,
@@ -439,11 +471,13 @@ async function drive(
           message: seam.body.message,
           detail: { reason: seam.body.reason },
         });
-        await convex().mutation(api.runs.setStatus, {
-          runId: ctx.runId,
-          status: "failed",
-          haltedReason: seam.body.reason,
-        });
+        await withRetry(`fail run ${ctx.runId}`, () =>
+          convex().mutation(api.runs.setStatus, {
+            runId: ctx.runId,
+            status: "failed",
+            haltedReason: seam.body.reason,
+          }),
+        );
         await appendEvent(ctx, "run_finished", {
           message: "Run stopped on a denial.",
         });
@@ -486,10 +520,12 @@ async function drive(
     messages.push({ role: "user", content: results });
   }
 
-  await convex().mutation(api.runs.setStatus, {
-    runId: ctx.runId,
-    status: "failed",
-  });
+  await withRetry(`fail run ${ctx.runId}`, () =>
+    convex().mutation(api.runs.setStatus, {
+      runId: ctx.runId,
+      status: "failed",
+    }),
+  );
   await appendEvent(ctx, "run_finished", {
     message: "Run stopped at the turn limit.",
   });
