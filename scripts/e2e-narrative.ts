@@ -20,7 +20,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { ConvexHttpClient } from "convex/browser";
@@ -121,6 +121,9 @@ function loadEnvFile(filename: string): void {
 }
 
 loadEnvFile(".env.local");
+
+/** Saved browser session, so a re-run does not need a fresh sign-in. */
+const AUTH_STATE = ".e2e-auth.json";
 
 const PORT = Number(process.env.E2E_PORT ?? 3001);
 const BASE = `http://localhost:${PORT}`;
@@ -473,8 +476,16 @@ async function main(): Promise<void> {
   );
 
   browser = await chromium.launch({ headless: false });
-  context = await browser.newContext();
+
+  // A saved session makes re-runs cheap: the operator signs in once, and
+  // subsequent runs go straight to the narrative. The step-6 re-authentication
+  // is never skipped — that beat is the point of the whole exercise.
+  const reusable = existsSync(AUTH_STATE) ;
+  context = await browser.newContext(
+    reusable ? { storageState: AUTH_STATE } : {},
+  );
   const page = await context.newPage();
+  if (reusable) info(`reusing saved session from ${AUTH_STATE}`);
 
   // -- Step 1 --------------------------------------------------------------
   step(1, "Clean slate");
@@ -486,9 +497,11 @@ async function main(): Promise<void> {
   assertEqual(opening.destructiveAttempts, 0, "no destructive attempts yet");
 
   // Land the operator directly on the provider rather than on a page with a
-  // button they have to find. The window is a fresh browser profile, so there
-  // is no existing session to reuse.
-  await page.goto(`${BASE}/api/auth/login?returnTo=%2F`);
+  // button they have to find. With a saved session this is a no-op redirect
+  // straight back to the app.
+  await page.goto(
+    reusable ? BASE : `${BASE}/api/auth/login?returnTo=%2F`,
+  );
   console.log(
     `\n   ${YELLOW}${BOLD}▶ OPERATOR: sign in.${RESET}\n` +
       `   ${YELLOW}A Chromium window has opened at the Kinde sign-in page.${RESET}\n` +
@@ -496,7 +509,9 @@ async function main(): Promise<void> {
       `   ${DIM}Waiting up to ${OPERATOR_TIMEOUT_MS / 60_000} minutes…${RESET}`,
   );
   const session = await waitForSignIn();
+  await context.storageState({ path: AUTH_STATE });
   info(`signed in as ${session.idToken?.email ?? session.idToken?.sub}`);
+  info(`session saved to ${AUTH_STATE} — later runs will skip this step`);
 
   // -- Step 2 --------------------------------------------------------------
   step(2, "Step-up mode — a read-only task is never interrupted");

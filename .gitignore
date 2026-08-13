@@ -50,3 +50,6 @@ CLAUDE.md
 
 # Local audit spool — never committed
 .audit-spool.jsonl*
+
+# Saved e2e browser session — never committed
+.e2e-auth.json
