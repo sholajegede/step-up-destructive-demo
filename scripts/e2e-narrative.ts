@@ -380,6 +380,36 @@ type SessionView = {
 
 const readSession = () => inSession<SessionView>("/api/auth/session");
 
+/**
+ * Waits until the operator's authentication is older than a tool's window.
+ *
+ * Blanket mode's hole only *bites* when the human is not actually present.
+ * Right after a sign-in the authentication is genuinely fresh, so a
+ * destructive call that skips the check still happens to have a real person
+ * behind it — and `executedWithoutFreshAuth` correctly stays at zero. To show
+ * the failure honestly, the narrative first lets the authentication go stale,
+ * then demonstrates that blanket mode does not care.
+ */
+async function waitUntilAuthStale(windowSeconds: number): Promise<number> {
+  const target = windowSeconds + 35; // window plus the clock-skew grace
+  const deadline = Date.now() + 420_000;
+  let age = 0;
+  while (Date.now() < deadline) {
+    const { body } = await readSession();
+    const authTime = body.idToken?.authTime;
+    if (authTime === undefined) {
+      throw new Error("auth_time is not readable; cannot age the session");
+    }
+    age = Math.floor(Date.now() / 1000) - authTime;
+    if (age > target) return age;
+    info(
+      `authentication is ${age}s old; waiting for it to pass ${target}s so the hole is real…`,
+    );
+    await sleep(15_000);
+  }
+  throw new Error("timed out waiting for the authentication to go stale");
+}
+
 /** Manual beats wait generously — a person may not be at the keyboard. */
 const OPERATOR_TIMEOUT_MS = 900_000;
 
@@ -470,9 +500,15 @@ async function main(): Promise<void> {
 
   // -- Step 3 --------------------------------------------------------------
   step(3, "Blanket mode — the hole, shown deliberately");
+
+  // `refund_payment` carries a 120s window — the shortest in the registry, so
+  // this is the quickest the narrative can honestly reach a stale state.
+  const staleAge = await waitUntilAuthStale(120);
+  info(`authentication is now ${staleAge}s old — well past the 120s window`);
+
   await startServer("blanket");
   const slip = await runTask(
-    "Delete the superseded vendor contract document, DOC-3303.",
+    "Refund invoice INV-1043 in full. It is the seat expansion invoice.",
   );
   const slipRows = await auditFor(slip.correlationId);
   const slipped = slipRows.find(
@@ -495,10 +531,15 @@ async function main(): Promise<void> {
     "the audit row records the mode that let it through",
   );
 
-  const deleted = await recordByRef("DOC-3303");
+  const refunded = await recordByRef("INV-1043");
   assert(
-    deleted?.deletedAt !== undefined,
+    refunded?.refundedAt !== undefined,
     "the record was actually changed — the action ran for real",
+  );
+  assert(
+    (slipped?.authAgeSeconds ?? 0) > (slipped?.maxAuthAgeSeconds ?? 0),
+    "the authentication behind it was genuinely stale",
+    `age ${slipped?.authAgeSeconds}s vs window ${slipped?.maxAuthAgeSeconds}s`,
   );
 
   const afterSlip = await metrics();
