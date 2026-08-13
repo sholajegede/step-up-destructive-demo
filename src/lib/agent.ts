@@ -149,6 +149,20 @@ type LoopContext = {
   cookieHeader: string;
 };
 
+/**
+ * Appends a timeline event. Best-effort by design.
+ *
+ * `runEvents` is display telemetry: it drives the console timeline. The
+ * security record is `auditLog`, written inside the seam, and that write is
+ * strict — a failure there fails the call.
+ *
+ * The two are deliberately treated differently. In Phase 5 a transient
+ * network failure on the final timeline write turned a resume that had
+ * already released and executed a destructive action into an HTTP 500, which
+ * reads to an operator as "the action failed" — the most dangerous thing a
+ * console can say about a delete that actually happened. A timeline write can
+ * be lost without anything becoming unsafe; the audit row cannot.
+ */
 async function appendEvent(
   ctx: LoopContext,
   type: EventType,
@@ -158,13 +172,20 @@ async function appendEvent(
     detail?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await convex().mutation(api.runs.appendEvent, {
-    runId: ctx.runId,
-    type,
-    toolName: detail.toolName,
-    message: detail.message,
-    detail: detail.detail,
-  });
+  try {
+    await convex().mutation(api.runs.appendEvent, {
+      runId: ctx.runId,
+      type,
+      toolName: detail.toolName,
+      message: detail.message,
+      detail: detail.detail,
+    });
+  } catch (error) {
+    console.error(
+      `[run ${ctx.runId}] timeline write failed for "${type}":`,
+      error instanceof Error ? error.message : error,
+    );
+  }
 }
 
 /** Freezes the conversation at a challenge and returns the halted outcome. */
@@ -215,9 +236,13 @@ async function pauseOnChallenge(
       message: seam.body.message ?? "A fresh authentication is required.",
       requiredMaxAge: seam.body.maxAuthAgeSeconds,
       authAgeSeconds: seam.body.authAgeSeconds,
+      // The link carries the run back to the console, so the person lands
+      // where the paused timeline is and the round trip closes in one place.
+      // `max_age=0` and `prompt=login` are asks to the provider, never proof:
+      // the resume is re-checked against `auth_time` by the seam.
       reauthUrl:
-        seam.body.reauthUrl ??
-        "/api/auth/login?max_age=0&prompt=login&stepUp=1",
+        `/api/auth/login?max_age=0&prompt=login&stepUp=1&returnTo=` +
+        encodeURIComponent(`/?resume=${ctx.runId}`),
       correlationId: seam.body.correlationId ?? ctx.correlationId,
     },
   };
@@ -478,22 +503,36 @@ async function drive(
   };
 }
 
-export async function runAgent(options: {
+/**
+ * Opens a run and returns its id without doing any work.
+ *
+ * Split from the loop so the console can start streaming the timeline
+ * immediately. The agent's first model turn takes seconds; an operator should
+ * not stare at nothing while it happens.
+ */
+export async function createRun(options: {
   prompt: string;
   userId: string;
-  cookieHeader: string;
   correlationId: string;
-}): Promise<AgentOutcome> {
-  const runId = await convex().mutation(api.runs.start, {
+}): Promise<Id<"runs">> {
+  return await convex().mutation(api.runs.start, {
     correlationId: options.correlationId,
     userId: options.userId,
     prompt: options.prompt,
     approvalMode: approvalMode(),
   });
+}
 
+/** Drives an already-opened run to its first stopping point. */
+export async function runAgent(options: {
+  runId: Id<"runs">;
+  prompt: string;
+  cookieHeader: string;
+  correlationId: string;
+}): Promise<AgentOutcome> {
   return await drive(
     {
-      runId,
+      runId: options.runId,
       correlationId: options.correlationId,
       cookieHeader: options.cookieHeader,
     },
