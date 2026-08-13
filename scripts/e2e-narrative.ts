@@ -683,7 +683,7 @@ async function main(): Promise<void> {
   // -- Step 5 --------------------------------------------------------------
   step(5, "The negative — a refresh cycle must not release the action");
   const before = await readSession();
-  const authTimeBefore = before.body.idToken?.authTime;
+  const authTimeBefore = before.body?.idToken?.authTime;
   assert(
     authTimeBefore !== undefined,
     "auth_time is readable before the refresh",
@@ -694,14 +694,14 @@ async function main(): Promise<void> {
   }>("/api/auth/refresh", { method: "POST" });
   assertEqual(refreshed.status, 200, "the refresh succeeded");
   assertEqual(
-    refreshed.body.comparison?.authTimeMoved,
+    refreshed.body?.comparison?.authTimeMoved,
     false,
     "the refresh did NOT advance auth_time",
   );
 
   const afterRefresh = await readSession();
   assertEqual(
-    afterRefresh.body.idToken?.authTime,
+    afterRefresh.body?.idToken?.authTime,
     authTimeBefore,
     "auth_time is byte-identical after a machine-to-machine refresh",
   );
@@ -743,7 +743,7 @@ async function main(): Promise<void> {
   let authTimeAfter: number | undefined;
   while (Date.now() < deadline) {
     const now = await readSession().catch(() => null);
-    const candidate = now?.body.idToken?.authTime;
+    const candidate = now?.body?.idToken?.authTime;
     if (candidate !== undefined && candidate > (authTimeBefore ?? 0)) {
       authTimeAfter = candidate;
       break;
