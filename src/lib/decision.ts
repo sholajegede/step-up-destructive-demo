@@ -26,7 +26,10 @@ export type DecisionReason =
   | "token_invalid"
   | "unknown_tool"
   | "tool_disabled"
-  | "registry_defect";
+  | "registry_defect"
+  | "mfa_required"
+  | "amr_unprovable"
+  | "audit_unavailable";
 
 export type DecisionInput = {
   destructive: boolean;

@@ -7,7 +7,13 @@ import {
   type Decision,
   type DecisionReason,
 } from "./decision";
-import { appConfig, approvalMode, type ApprovalMode } from "./env";
+import {
+  appConfig,
+  approvalMode,
+  requiredAuthMethods,
+  type ApprovalMode,
+} from "./env";
+import { writeAuditRow } from "./audit-sink";
 import { TokenVerificationError, verifyAccessToken, verifyIdToken } from "./jwt";
 
 /**
@@ -51,6 +57,8 @@ export type EnforcementResult = {
   maxAuthAgeSeconds?: number;
   /** Authentication methods from the ID token, when the provider sends them. */
   amr?: string[];
+  /** Where the audit row for this decision landed. */
+  auditDurability?: "recorded" | "spooled" | "lost";
   /** Set on a challenge. The RFC 9470 `WWW-Authenticate` value. */
   challengeHeader?: string;
   /** Human-readable explanation. Safe to show a caller. */
@@ -83,6 +91,12 @@ const MESSAGES: Record<DecisionReason, string> = {
   tool_disabled: "This tool is registered but disabled.",
   registry_defect:
     "This destructive tool declares no freshness window. Refused rather than treated as unlimited.",
+  mfa_required:
+    "This action requires a stronger authentication method than the one used.",
+  amr_unprovable:
+    "The token carries no record of how the person authenticated, so the required method cannot be proved.",
+  audit_unavailable:
+    "The decision could not be recorded, so it was refused. An action that cannot be audited must not run.",
 };
 
 /**
@@ -115,7 +129,14 @@ export async function enforceToolCall(
     reason: DecisionReason,
     extra: { authAgeSeconds?: number; requiredMaxAge?: number } = {},
   ): Promise<EnforcementResult> => {
-    await convex().mutation(api.audit.record, {
+    // The row is written before the answer is returned, and the outcome of
+    // that write can change the answer: an action that cannot be recorded at
+    // all must not run. A refusal is downgraded rather than upgraded — the
+    // audit outcome can only ever make the decision stricter.
+    let effectiveDecision = decision;
+    let effectiveReason = reason;
+
+    const written = await writeAuditRow({
       correlationId,
       userId: observed.subject ?? "unknown",
       toolName: context.toolName,
@@ -131,9 +152,28 @@ export async function enforceToolCall(
       recordRef: context.recordRef,
     });
 
+    if (written.durability === "lost" && decision === "allow") {
+      // Neither the store nor the spool took it. Allowing now would mean an
+      // action ran with no evidence anywhere that it was permitted.
+      effectiveDecision = "deny";
+      effectiveReason = "audit_unavailable";
+      await writeAuditRow({
+        correlationId,
+        userId: observed.subject ?? "unknown",
+        toolName: context.toolName,
+        destructive: observed.destructive,
+        decision: "deny",
+        reason: "audit_unavailable",
+        approvalMode: mode,
+        tokenId: observed.tokenId,
+        recordRef: context.recordRef,
+      }).catch(() => undefined);
+    }
+
     return {
-      decision,
-      reason,
+      decision: effectiveDecision,
+      reason: effectiveReason,
+      auditDurability: written.durability,
       correlationId,
       approvalMode: mode,
       subject: observed.subject,
@@ -142,13 +182,13 @@ export async function enforceToolCall(
       authAgeSeconds: extra.authAgeSeconds,
       maxAuthAgeSeconds: observed.maxAuthAgeSeconds,
       amr: observed.amr,
-      message: MESSAGES[reason],
+      message: MESSAGES[effectiveReason],
       challengeHeader:
-        decision === "challenge" && extra.requiredMaxAge !== undefined
+        effectiveDecision === "challenge" && extra.requiredMaxAge !== undefined
           ? buildChallengeHeader({
               requiredMaxAge: extra.requiredMaxAge,
-              reason,
-              description: MESSAGES[reason],
+              reason: effectiveReason,
+              description: MESSAGES[effectiveReason],
             })
           : undefined,
     };
@@ -233,6 +273,33 @@ export async function enforceToolCall(
     clockSkewSeconds,
     approvalMode: mode,
   });
+
+  // 5. Method, when the deployment demands one.
+  //
+  //    Only checked on a release, and only in step-up mode: it strengthens an
+  //    allow, it never rescues a challenge. Configured empty by default —
+  //    this provider emits no `amr`, so requiring one would refuse every
+  //    destructive call. That refusal would be correct (a demand that cannot
+  //    be evidenced must not be waved through) but it is not a control this
+  //    tenant can satisfy, so it stays off rather than pretended.
+  if (outcome.decision === "allow" && mode === "step-up") {
+    const required = requiredAuthMethods();
+    if (required.length > 0) {
+      if (observed.amr === undefined || observed.amr.length === 0) {
+        return await finish("challenge", "amr_unprovable", {
+          authAgeSeconds: outcome.authAgeSeconds,
+          requiredMaxAge: tool.maxAuthAgeSeconds,
+        });
+      }
+      const used = observed.amr.map((method) => method.toLowerCase());
+      if (!required.some((method) => used.includes(method))) {
+        return await finish("challenge", "mfa_required", {
+          authAgeSeconds: outcome.authAgeSeconds,
+          requiredMaxAge: tool.maxAuthAgeSeconds,
+        });
+      }
+    }
+  }
 
   return await finish(outcome.decision, outcome.reason, {
     authAgeSeconds: outcome.authAgeSeconds,
