@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { after, NextResponse, type NextRequest } from "next/server";
 import { resumeAgent } from "@/lib/agent";
 import type { Id } from "../../../../../../../convex/_generated/dataModel";
 import { verifyIdToken } from "@/lib/jwt";
@@ -17,8 +17,10 @@ export const maxDuration = 300;
  * original attempt — there is no path through this route that releases an
  * action the seam would not release on its own.
  *
- * The `auth_time` read here is for the audit narrative only, and is read from
- * a verified token rather than taken from the caller.
+ * Like the start route, the work runs after the response and the outcome is
+ * read from the run itself. Whether the action was released, refused, or the
+ * request failed on the way back, the timeline and the audit trail are the
+ * record — not this response.
  */
 export async function POST(
   request: NextRequest,
@@ -56,32 +58,18 @@ export async function POST(
 
   const { runId } = await context.params;
 
-  try {
-    const outcome = await resumeAgent({
-      runId: runId as Id<"runs">,
-      userId: session.subject,
-      cookieHeader,
-      observedAuthTime,
-    });
-
-    if ("error" in outcome) {
-      return NextResponse.json(outcome, {
-        status: outcome.error === "not_found" ? 404 : 409,
+  after(async () => {
+    try {
+      await resumeAgent({
+        runId: runId as Id<"runs">,
+        userId: session.subject,
+        cookieHeader,
+        observedAuthTime,
       });
+    } catch (error) {
+      console.error(`[run ${runId}] resume failed:`, error);
     }
+  });
 
-    // A resume that the seam refused again is reported as 403, so a caller
-    // cannot mistake "still held" for "released".
-    return NextResponse.json(outcome, {
-      status: outcome.status === "halted" ? 403 : 200,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: "resume_failed",
-        message: error instanceof Error ? error.message : "The resume failed.",
-      },
-      { status: 500 },
-    );
-  }
+  return NextResponse.json({ runId, accepted: true }, { status: 202 });
 }

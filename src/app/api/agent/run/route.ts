@@ -1,15 +1,19 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { runAgent } from "@/lib/agent";
+import { after, NextResponse, type NextRequest } from "next/server";
+import { createRun, runAgent } from "@/lib/agent";
 import { newCorrelationId } from "@/lib/enforcement";
 import { readSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
-
-/** Long-horizon tool loops need more than the default serverless budget. */
 export const maxDuration = 300;
 
 /**
  * Starts an agent run.
+ *
+ * The run row is created first and its id returned immediately, then the loop
+ * is driven after the response. The console subscribes to the run in Convex,
+ * so the operator watches the timeline fill in rather than waiting on this
+ * request — and a failure on the way back cannot misreport work that the
+ * timeline and audit trail already record correctly.
  *
  * The run carries the caller's own session. There is no service account and
  * no agent credential: the cookie header is forwarded to the seam unchanged,
@@ -57,21 +61,34 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const correlationId = newCorrelationId();
+  let runId;
   try {
-    const outcome = await runAgent({
+    runId = await createRun({
       prompt,
       userId: session.subject,
-      cookieHeader,
-      correlationId: newCorrelationId(),
+      correlationId,
     });
-    return NextResponse.json(outcome);
   } catch (error) {
     return NextResponse.json(
       {
-        error: "agent_failed",
-        message: error instanceof Error ? error.message : "The run failed.",
+        error: "run_not_started",
+        message:
+          error instanceof Error ? error.message : "The run could not start.",
       },
       { status: 500 },
     );
   }
+
+  after(async () => {
+    try {
+      await runAgent({ runId, prompt, cookieHeader, correlationId });
+    } catch (error) {
+      // The run's own status and timeline carry the outcome; this is a last
+      // resort so a crash is not silent in the server log.
+      console.error(`[run ${runId}] agent loop failed:`, error);
+    }
+  });
+
+  return NextResponse.json({ runId, correlationId }, { status: 202 });
 }
