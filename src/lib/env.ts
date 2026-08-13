@@ -149,6 +149,38 @@ export function appConfig() {
   };
 }
 
+/** Durability settings for the audit trail. */
+export function auditConfig() {
+  assertServer();
+  return {
+    /** Attempts against the audit store before falling back to the spool. */
+    writeAttempts: optionalNumber("AUDIT_WRITE_ATTEMPTS", 3),
+    retryBaseMs: optionalNumber("AUDIT_RETRY_BASE_MS", 120),
+    /** Append-only local fallback. Never committed. */
+    spoolFile: optional("AUDIT_SPOOL_FILE", ".audit-spool.jsonl"),
+  };
+}
+
+/**
+ * Authentication methods that a destructive release must evidence.
+ *
+ * Empty by default, and empty is the honest setting on this provider: Kinde
+ * does not emit `amr` or `acr` on either token, so there is nothing to check
+ * against. Setting it would refuse every destructive call — which is the
+ * correct fail-closed behaviour for "you asked me to prove something I cannot
+ * observe", but it is not a control that can be satisfied here.
+ *
+ * The check exists so that a provider which does emit `amr` can be asserted
+ * against by configuration alone, with no code change and no pretending.
+ */
+export function requiredAuthMethods(): string[] {
+  assertServer();
+  return optional("STEP_UP_REQUIRED_AMR", "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value !== "");
+}
+
 /** Convex deployment URL, safe to expose to the browser. */
 export function convexUrl(): string {
   return required("NEXT_PUBLIC_CONVEX_URL");

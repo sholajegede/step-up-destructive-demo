@@ -47,3 +47,6 @@ next-env.d.ts
 BUILD_PLAN.md
 BUILD_LOG.md
 CLAUDE.md
+
+# Local audit spool — never committed
+.audit-spool.jsonl*
