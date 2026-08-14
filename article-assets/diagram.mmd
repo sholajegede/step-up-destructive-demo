@@ -1,0 +1,57 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica, Arial, sans-serif","fontSize":"15px","lineColor":"#5b6675","primaryTextColor":"#111418","clusterBkg":"#fbfcfd","clusterBorder":"#8a94a0","edgeLabelBackground":"#ffffff"},"flowchart":{"htmlLabels":true,"nodeSpacing":34,"rankSpacing":44,"curve":"basis"}}}%%
+flowchart LR
+  USER["Person signs in to the records console<br/>Kinde OIDC, authorization code + PKCE"]
+  AGENT["Claude agent loop<br/>model id read from the environment<br/>holds no credential of its own"]
+
+  USER -->|"encrypted session cookie<br/>POST /api/agent/run"| AGENT
+  AGENT -->|"POST /api/tools/invoke<br/>forwards the person's session cookie"| V
+
+  subgraph SEAM["enforceToolCall — every tool call takes this path"]
+    direction TB
+    V{"Access token verified?<br/>JWKS, RS256 pinned"}
+    DQ{"Registry: is the tool<br/>destructive?"}
+    ID["Verify the ID token<br/>bind it by subject<br/>read auth_time"]
+    MQ{"APPROVAL_MODE<br/>server environment only"}
+    FQ{"now − auth_time ≤<br/>window + clock skew?"}
+
+    V -->|"no"| DENY["deny: token_invalid<br/>HTTP 401"]
+    V -->|"yes"| DQ
+    DQ -->|"no"| ALLOW1["allow: safe_tool"]
+    DQ -->|"yes"| ID
+    ID --> MQ
+    MQ -->|"blanket"| ALLOW3["allow:<br/>blanket_mode_freshness_skipped"]
+    MQ -->|"step-up"| FQ
+    FQ -->|"yes"| ALLOW2["allow: fresh_authentication"]
+    FQ -->|"no"| CHAL["challenge: auth_time_stale<br/>HTTP 403 + WWW-Authenticate: Bearer<br/>insufficient_user_authentication, max_age=120"]
+  end
+
+  ALLOW1 --> EXEC
+  ALLOW2 --> EXEC
+  ALLOW3 --> EXEC["Tool executor runs the tool<br/>a destructive tool changes the record"]
+  CHAL --> HELD["The run halts<br/>it holds the exact tool call:<br/>tool use id, name, input"]
+  HELD --> REAUTH["The person re-authenticates<br/>max_age=0 and prompt=login ask for a sign-in<br/>they are never read as proof"]
+  REAUTH --> RELEASED["auth_time advances<br/>the same held call re-enters the seam<br/>and is decided again as fresh_authentication<br/>the executor runs it once"]
+
+  ALLOW1 -.-> AUDIT
+  ALLOW2 -.-> AUDIT
+  ALLOW3 -.-> AUDIT
+  CHAL -.-> AUDIT
+  DENY -.-> AUDIT["One audit row per decision<br/>one correlationId per run<br/>an action that cannot be recorded does not run"]
+
+  classDef allow fill:#e8f5ec,stroke:#3f8f5c,color:#123322;
+  classDef hold fill:#fdf3dc,stroke:#b78a1e,color:#3a2c05;
+  classDef stop fill:#fbe9e9,stroke:#b3403f,color:#3d1211;
+  classDef plain fill:#f4f6f8,stroke:#8a94a0,color:#111418;
+  classDef step fill:#eaeef3,stroke:#6b7684,color:#111418;
+  classDef trail fill:#eef1f5,stroke:#5b6675,color:#111418;
+
+  class ALLOW1,ALLOW2,EXEC allow;
+  class ALLOW3,DENY stop;
+  class CHAL,HELD hold;
+  class REAUTH plain;
+  class RELEASED allow;
+  class USER,AGENT plain;
+  class V,DQ,ID,MQ,FQ step;
+  class AUDIT trail;
+
+  style SEAM fill:#fbfcfd,stroke:#8a94a0,color:#111418;
